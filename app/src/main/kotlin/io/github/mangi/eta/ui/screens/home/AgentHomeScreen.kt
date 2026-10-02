@@ -3,6 +3,7 @@ package io.github.mangi.eta.ui.screens.home
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.key
 import androidx.compose.ui.Modifier
+import io.github.mangi.eta.ui.components.AgentChatComposerDraft
 import io.github.mangi.eta.ui.components.AgentChatBody
 import io.github.mangi.eta.ui.components.chatConversationCompositionKey
 import io.github.mangi.eta.ui.model.AgentChatHomeUiState
@@ -20,6 +21,7 @@ internal fun AgentHomeScreen(
     state: AgentChatHomeUiState,
     modelPickerState: AgentModelPickerUiState,
     conversationKey: String?,
+    composerDraft: AgentChatComposerDraft,
     onAction: (AgentHomeAction) -> Unit,
     isDrawerOpen: Boolean = false,
     modifier: Modifier = Modifier,
@@ -30,6 +32,7 @@ internal fun AgentHomeScreen(
             modelPickerState = modelPickerState,
             isCompacting = state.isCompacting,
             input = state.input,
+            composerDraft = composerDraft,
             isStreaming = state.isStreaming,
             reasoningEffort = state.reasoningEffort,
             availableReasoningEfforts = state.availableReasoningEfforts,
@@ -42,6 +45,9 @@ internal fun AgentHomeScreen(
             canCompactContext = state.canCompactContext,
             onModelSelected = { onAction(AgentHomeAction.ModelSelected(it)) },
             onSubmit = { text -> onAction(AgentHomeAction.SubmitMessage(text)) },
+            onSupplement = { text, requestId, onResult ->
+                onAction(AgentHomeAction.SupplementMessage(text, requestId, onResult))
+            },
             onStop = { onAction(AgentHomeAction.StopRun) },
             onAttachImage = { uri -> onAction(AgentHomeAction.ImageAttached(uri)) },
             onRemoveImage = { id -> onAction(AgentHomeAction.RemoveImage(id)) },

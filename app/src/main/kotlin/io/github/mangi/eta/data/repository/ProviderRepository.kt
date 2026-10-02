@@ -114,6 +114,9 @@ internal object ProviderRepository {
             ?: builtIn
         )
         replaceProvider(restored)
+        if (id == BuiltinProviders.OPENAI_CODEX_ID) {
+            SettingsDataStore.clearHiddenRemoteModels(id)
+        }
         repairSelection()
     }
 
@@ -144,6 +147,10 @@ internal object ProviderRepository {
                 }
             }
             SettingsDataStore.setOfficialModelCatalogRevision(OfficialModelCatalog.CURRENT_REVISION)
+        }
+        providerById(BuiltinProviders.OPENAI_CODEX_ID)?.let { existing ->
+            val onlineOnly = existing.models.filterNot { it.source == ModelSource.CATALOG }
+            if (onlineOnly.size != existing.models.size) replaceModels(existing.id, onlineOnly)
         }
         repairSelection()
     }
@@ -200,6 +207,7 @@ internal object ProviderRepository {
     }
 
     private fun seedOfficialModelsIfEmpty(provider: ProviderSetting): ProviderSetting {
+        if (provider.id == BuiltinProviders.OPENAI_CODEX_ID) return provider
         if (provider.models.isNotEmpty()) return provider
         val seededModels = OfficialModelCatalog.modelsForProvider(provider)
         return if (seededModels.isEmpty()) provider else provider.withModels(seededModels)
