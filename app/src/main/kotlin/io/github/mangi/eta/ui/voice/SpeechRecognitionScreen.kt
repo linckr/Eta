@@ -65,6 +65,7 @@ internal fun SpeechRecognitionScreen(onBack: () -> Unit, onOpenOss: () -> Unit) 
                     stringResource(
                         when (settings.asr) {
                             AsrProvider.SYSTEM -> R.string.speech_asr_note_system
+                            AsrProvider.BREENO -> R.string.speech_asr_note_breeno
                             AsrProvider.QWEN_REALTIME, AsrProvider.DOUBAO -> R.string.speech_asr_note_streaming
                             AsrProvider.QWEN_FLASH -> R.string.speech_asr_note_flash
                             AsrProvider.QWEN_FILE -> R.string.speech_asr_note_file
@@ -73,12 +74,12 @@ internal fun SpeechRecognitionScreen(onBack: () -> Unit, onOpenOss: () -> Unit) 
                 )
             }
         }
-        if (settings.asr != AsrProvider.SYSTEM) {
+        if (settings.asr != AsrProvider.SYSTEM && settings.asr != AsrProvider.BREENO) {
             item(key = "connection") {
                 SpeechConnectionSection(store, synthesis = false)
             }
         }
-        if (settings.asr != AsrProvider.SYSTEM && settings.asr != AsrProvider.DOUBAO) {
+        if (settings.asr != AsrProvider.SYSTEM && settings.asr != AsrProvider.DOUBAO && settings.asr != AsrProvider.BREENO) {
             item(key = "language") {
                 EtaPreferenceGroup {
                     SpeechFieldColumn {
@@ -136,6 +137,14 @@ private fun SpeechRecognitionTestSection(store: SpeechSettingsStore) {
                 onClick = { if (state.active) store.recognition.finish() else request() },
                 endActions = {
                     if (state.active) {
+                        EtaTextButton(
+                            text = stringResource(R.string.action_done),
+                            onClick = { store.recognition.finish() },
+                            minWidth = 0.dp,
+                            minHeight = 34.dp,
+                            cornerRadius = 17.dp,
+                            insideMargin = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                        )
                         EtaTextButton(
                             text = stringResource(R.string.action_cancel),
                             onClick = { store.recognition.cancel() },

@@ -1303,8 +1303,10 @@ internal class AgentAppState(
         operation: String = AgentRuntimeWire.OP_CHAT,
         rewriteTargetMessageId: String? = null,
     ) {
-        if (modelPickerState.selectedModel?.contextWindow == null && modelPickerState.selectedModel != null) {
-            Toast.makeText(appContext, appContext.getString(R.string.context_no_model_limit), Toast.LENGTH_LONG).show()
+        if (operation == AgentRuntimeWire.OP_COMPACT &&
+            modelPickerState.selectedModel?.contextWindow?.takeIf { it > 0 } == null
+        ) {
+            Toast.makeText(appContext, appContext.getString(R.string.context_manual_window_required), Toast.LENGTH_LONG).show()
             return
         }
         runConversationIds[runId] = conversationId

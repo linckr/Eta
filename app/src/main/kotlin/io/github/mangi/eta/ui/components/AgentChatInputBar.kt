@@ -143,7 +143,6 @@ internal fun AgentChatInputBar(
             selection = TextRange(range.min + recognized.length)
         }
     }
-    LaunchedEffect(isStreaming, isEditingMessage) { dictation.cancel() }
     var wasEditingMessage by remember { mutableStateOf(isEditingMessage) }
     val canSend = textFieldState.text.isNotBlank() ||
         pendingImages.isNotEmpty() ||
@@ -161,6 +160,9 @@ internal fun AgentChatInputBar(
         .coerceAtLeast(ListPopupDefaults.MinPopupHeight)
 
     LaunchedEffect(isEditingMessage) {
+        // Dictation remains a local draft while a task runs. Only changing the
+        // message editing context invalidates its insertion target.
+        dictation.cancel()
         // 编辑态由外部业务状态驱动；普通输入只保留在本地，避免每个字符把聊天舞台
         // 的消息流、滚动和 Markdown 一起带入重组。
         if (isEditingMessage || wasEditingMessage) {
@@ -183,6 +185,7 @@ internal fun AgentChatInputBar(
     }
     val submitSupplement: () -> Unit = {
         if (canSupplement) {
+            dictation.cancel()
             val supplementText = textFieldState.text.toString()
             val requestId = composerDraft.beginSupplement(supplementText)
             onSupplement(supplementText, requestId) { accepted ->
@@ -359,7 +362,7 @@ internal fun AgentChatInputBar(
                             Spacer(modifier = Modifier.width(2.dp))
                         }
 
-                        SpeechDictationButton(dictation, enabled = !isStreaming)
+                        SpeechDictationButton(dictation, enabled = true)
 
                         Spacer(modifier = Modifier.width(2.dp))
 

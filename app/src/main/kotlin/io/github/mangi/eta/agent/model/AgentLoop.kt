@@ -131,9 +131,10 @@ internal class AgentLoop(
                         providerEvent.toAgentEvent(attemptRound)?.let(onEvent)
                     },
                     discardAttemptReasoning = { accumulatedReasoning.setLength(reasoningLengthBeforeRound) },
-                ).also { response ->
-                    if (purpose == ProviderRequestPurpose.CHAT) validateChatResponse(response.response)
-                }
+                    validateResponse = { response ->
+                        if (purpose == ProviderRequestPurpose.CHAT) validateChatResponse(response)
+                    },
+                )
             } finally {
                 // 同一回合的重试仍需原始观察；整个回合结束后才移除截图。
                 discardPendingToolImageMessage()

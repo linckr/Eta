@@ -24,6 +24,20 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [36])
 class RootlessDeviceToolsTest {
+    @Test(timeout = 5_000)
+    fun rootedDeviceWithoutAccessibilityRejectsTextWaitAndLegacyNodeActions() {
+        val controller = RootShellDeviceController(NoOpLogger, rootAvailable = { true })
+        // Root must not start system UIAutomator while waiting for text.
+        val wait = JSONObject(controller.waitForText("目标", 60_000, true, "exact"))
+        assertEquals("ACCESSIBILITY_UNAVAILABLE", wait.getString("code"))
+        val legacy = RootShellDeviceController.ElementObservation(
+            id = "legacy-root", source = RootShellDeviceController.ElementSource.UIAUTOMATOR,
+            packageName = "example.app", windowId = null, nodes = emptyList(),
+            maxNodes = 60, truncated = false,
+        )
+        assertEquals("STALE_NODE", JSONObject(controller.tapElement(legacy, 1)).getString("code"))
+    }
+
     @Test
     fun disconnectedGuiFailsBeforeShellAndDoesNotPublishObservation() {
         val controller = RootShellDeviceController(NoOpLogger, rootAvailable = { false })

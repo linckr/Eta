@@ -59,7 +59,10 @@ internal object OpenAiResponsesProvider : AgentProviderClient {
                 onEvent(ProviderEvent.ResponseHeaders(response.code))
                 runController.throwIfCancelled()
                 if (!response.isSuccessful) {
-                    throw AgentModelFailure.http(response.code, response.peekBody(16_384).string())
+                    val errorBody = response.peekBody(16_384).string()
+                    throw if (DeepSeekHttpFailure.appliesTo(config)) {
+                        DeepSeekHttpFailure.from(response.code, errorBody)
+                    } else AgentModelFailure.http(response.code, errorBody)
                 }
                 val streamed = readStreamingResponse(
                     stream = response.body.byteStream(),

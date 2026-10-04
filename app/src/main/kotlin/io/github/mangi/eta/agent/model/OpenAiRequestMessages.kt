@@ -22,7 +22,7 @@ internal object OpenAiRequestMessages {
                     remove("_eta_character_profile")
                 })
             }
-        }
+        }.also(ChatToolCallIdCompatibility::repairCopiedMessages)
     }
 
     fun responsesInstructions(source: JSONArray): String =

@@ -47,6 +47,7 @@ internal class SpeechInputController(
     private var job: Job? = null
     private var recorder: SpeechRecorder? = null
     private var system: EtaSpeechInput? = null
+    private var breeno: BreenoSpeechInput? = null
     private var lease: SpeechAudioLease? = null
     private var capturing = false
 
@@ -58,10 +59,13 @@ internal class SpeechInputController(
             try {
                 lease = SpeechAudioLease(context) { cancel() }.also { it.acquire(playback = false) }
                 val config = settings ?: SpeechSettingsRepository.settings()
-                val secrets = credentials ?: if (config.asr == AsrProvider.SYSTEM) SpeechCredentials()
+                val secrets = credentials ?: if (config.asr == AsrProvider.SYSTEM || config.asr == AsrProvider.BREENO) SpeechCredentials()
                     else SpeechSettingsRepository.credentials(context)
                 validateSpeechSettings(config, secrets, synthesis = false)
-                if (config.asr == AsrProvider.SYSTEM) {
+                if (config.asr == AsrProvider.BREENO) {
+                    startBreeno(session)
+                    awaitCancellation()
+                } else if (config.asr == AsrProvider.SYSTEM) {
                     startSystem(session)
                     awaitCancellation()
                 } else {
@@ -133,6 +137,34 @@ internal class SpeechInputController(
         }
     }
 
+    private fun startBreeno(session: Long) {
+        fun update(transform: (SpeechInputState) -> SpeechInputState) {
+            if (generation == session) mutableState.value = transform(mutableState.value)
+        }
+        breeno = BreenoSpeechInput(context,
+            automaticEndpoint = automaticEndpoint,
+            onListening = {
+                if (generation == session) { beforeCapture(); capturing = true }
+                update { it.copy(phase = EtaSpeechPhase.LISTENING, progress = "正在聆听，点击完成结束") }
+            },
+            onPartial = { text -> update { it.copy(preview = text) } },
+            onResult = { text ->
+                if (generation == session) {
+                    releaseCapture()
+                    lease?.close(); lease = null
+                    if (automaticEndpoint || finishRequested) { cancel(); onResult(text) }
+                    else {
+                        pendingSystemResult = text
+                        update { it.copy(phase = EtaSpeechPhase.LISTENING, preview = text, progress = "识别完成，点击完成插入", level = 0f) }
+                    }
+                }
+            },
+            onError = { failure ->
+                if (generation == session) { cancel(); mutableState.value = SpeechInputState(error = failure.userMessage) }
+            },
+        ).also { it.start() }
+    }
+
     private fun startSystem(session: Long) {
         fun update(transform: (SpeechInputState) -> SpeechInputState) {
             if (generation == session) mutableState.value = transform(mutableState.value)
@@ -174,9 +206,12 @@ internal class SpeechInputController(
         if (finishRequested) return
         finishRequested = true
         if (mutableState.value.phase == EtaSpeechPhase.STARTING) { cancel(); return }
+        // finish() may deliver a result synchronously and cancel this session.
+        // Set the waiting state first so it cannot overwrite that terminal callback.
+        mutableState.value = mutableState.value.copy(phase = EtaSpeechPhase.RECOGNIZING, progress = "正在识别", level = 0f)
         recorder?.finish()
         system?.finish()
-        mutableState.value = mutableState.value.copy(phase = EtaSpeechPhase.RECOGNIZING, progress = "正在识别", level = 0f)
+        breeno?.finish()
     }
 
     fun downloadModel() { system?.downloadModel() }
@@ -188,6 +223,7 @@ internal class SpeechInputController(
         recorder?.cancel(); recorder = null
         releaseCapture()
         system?.cancel(); system = null
+        breeno?.cancel(); breeno = null
         job?.cancel(); job = null
         lease?.close(); lease = null
         mutableState.value = SpeechInputState()

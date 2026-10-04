@@ -15,7 +15,13 @@ internal data class AgentOverlayState(
     val round: Int = 0,
     val status: AgentOverlayStatus = AgentOverlayStatus.Preparing,
     val detailText: String = "",
+    /** Bounded tail of provider-exposed thinking text, separate from the answer. */
+    val progressPreview: String = "",
 ) {
+    val currentThinkingLine: String get() = if (phase == AgentOverlayPhase.RUNNING && status == AgentOverlayStatus.Reasoning)
+        progressPreview.lineSequence().lastOrNull { it.isNotBlank() }?.trim().orEmpty()
+        else ""
+
     companion object {
         val Initial = AgentOverlayState(status = AgentOverlayStatus.Received)
     }
@@ -27,7 +33,8 @@ internal data class AgentOverlayState(
  * 文案逻辑只保留面向用户的一句话状态，
  * 工具名经 [toToolLabel] 中文化。详细 trace 流作为后续任务，此处不展开。
  */
-internal fun AgentOverlayState.applyEvent(event: AgentEvent): AgentOverlayState = when (event) {
+internal fun AgentOverlayState.applyEvent(event: AgentEvent): AgentOverlayState {
+    val next = when (event) {
     is AgentEvent.ContextCompaction -> copy(status = AgentOverlayStatus.RequestingModel, detailText = event.displayMessage)
     is AgentEvent.RunStarted -> copy(
         phase = AgentOverlayPhase.RUNNING,
@@ -62,8 +69,18 @@ internal fun AgentOverlayState.applyEvent(event: AgentEvent): AgentOverlayState 
     )
 
     is AgentEvent.AssistantBlockStart -> when (event.kind) {
-        AgentEvent.AssistantBlockKind.TEXT,
-        AgentEvent.AssistantBlockKind.THINKING -> this
+        AgentEvent.AssistantBlockKind.TEXT -> copy(
+            phase = AgentOverlayPhase.RUNNING,
+            round = event.round,
+            status = AgentOverlayStatus.GeneratingAnswer,
+        )
+
+        AgentEvent.AssistantBlockKind.THINKING -> copy(
+            phase = AgentOverlayPhase.RUNNING,
+            round = event.round,
+            status = AgentOverlayStatus.Reasoning,
+            progressPreview = "",
+        )
 
         AgentEvent.AssistantBlockKind.TOOL_CALL -> copy(
             phase = AgentOverlayPhase.RUNNING,
@@ -78,6 +95,7 @@ internal fun AgentOverlayState.applyEvent(event: AgentEvent): AgentOverlayState 
             phase = AgentOverlayPhase.RUNNING,
             round = event.round,
             status = AgentOverlayStatus.Reasoning,
+            progressPreview = appendThinkingPreview(progressPreview, event.delta),
         )
 
         AgentEvent.AssistantBlockKind.TOOL_CALL -> copy(
@@ -146,9 +164,19 @@ internal fun AgentOverlayState.applyEvent(event: AgentEvent): AgentOverlayState 
         status = AgentOverlayStatus.RunFailed,
         detailText = event.reason,
     )
+    }
+    // Tool, round, retry and answer events supersede the previous thinking line.
+    return if (next.status == AgentOverlayStatus.Reasoning) next else next.copy(progressPreview = "")
 }
 
 private const val MaxStreamingPreviewChars = 320
+private const val MaxThinkingPreviewChars = 240
+
+private fun appendThinkingPreview(previous: String, delta: String): String {
+    val tail = (previous + delta.takeLast(MaxThinkingPreviewChars)).takeLast(MaxThinkingPreviewChars)
+    // Truncation must not leave the low half of an emoji at the beginning.
+    return if (tail.firstOrNull()?.isLowSurrogate() == true) tail.drop(1) else tail
+}
 
 private fun AgentOverlayState.appendStreamingText(event: AgentEvent.AssistantBlockDelta): AgentOverlayState {
     val nextPreview = (detailText + event.delta)

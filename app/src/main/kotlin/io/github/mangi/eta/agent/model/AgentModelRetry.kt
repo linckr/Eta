@@ -19,14 +19,18 @@ internal class AgentModelRetry(
         onEvent: (AgentEvent) -> Unit,
         onProviderEvent: (Int, ProviderEvent) -> Unit,
         discardAttemptReasoning: () -> Unit,
+        validateResponse: (ProviderResponse) -> Unit = {},
     ): Result {
         var round = initialRound
         var retries = 0
+        var emptyRetries = 0
         while (true) {
             controller.throwIfCancelled()
             onEvent(AgentEvent.RoundStarted(round, request.messages.length()))
             var hostedToolStarted = false
             var callbackFailed = false
+            var validationFailed = false
+            var emptyResponseCanRetry = false
             try {
                 val response = provider.complete(request, controller) { event ->
                     if (event is ProviderEvent.HostedToolStarted) hostedToolStarted = true
@@ -37,6 +41,15 @@ internal class AgentModelRetry(
                         throw failure
                     }
                 }
+                controller.throwIfCancelled()
+                emptyResponseCanRetry = request.purpose == ProviderRequestPurpose.CHAT &&
+                    response.stopReason in setOf(AssistantStopReason.END_TURN, AssistantStopReason.UNKNOWN)
+                try {
+                    validateResponse(response)
+                } catch (failure: Exception) {
+                    validationFailed = true
+                    throw failure
+                }
                 return Result(round, response)
             } catch (failure: Exception) {
                 controller.throwIfCancelled()
@@ -45,6 +58,22 @@ internal class AgentModelRetry(
                 if (hostedToolStarted) throw AgentModelFailure(
                     classified.code, false, classified.message.orEmpty(), classified,
                 )
+                if (validationFailed) {
+                    if (classified.code != "MODEL_EMPTY_RESPONSE" || !emptyResponseCanRetry) throw classified
+                    if (emptyRetries == MAX_EMPTY_RETRIES) throw AgentModelFailure(
+                        classified.code, false,
+                        "${classified.message} 已重试 $MAX_EMPTY_RETRIES 次仍为空，已保留此前完成的工具结果。",
+                        classified,
+                    )
+                    emptyRetries += 1
+                    onEvent(AgentEvent.ModelRetryScheduled(round, emptyRetries, MAX_EMPTY_RETRIES,
+                        BASE_DELAY_MS.toInt(), classified.code))
+                    waitBeforeRetry(controller, BASE_DELAY_MS)
+                    controller.throwIfCancelled()
+                    discardAttemptReasoning()
+                    round += 1
+                    continue
+                }
                 if (!classified.retryable) throw classified
                 if (retries == MAX_RETRIES) {
                     throw AgentModelFailure(
@@ -67,6 +96,7 @@ internal class AgentModelRetry(
 
     companion object {
         private const val MAX_RETRIES = 3
+        private const val MAX_EMPTY_RETRIES = 1
         private const val BASE_DELAY_MS = 2_000L
     }
 }

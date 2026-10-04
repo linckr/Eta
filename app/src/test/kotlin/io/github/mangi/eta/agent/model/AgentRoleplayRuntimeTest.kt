@@ -12,6 +12,26 @@ import org.junit.Test
 
 class AgentRoleplayRuntimeTest {
     @Test
+    fun unknownWindowKeepsCharacterChatWithoutBudgetedWorldbookInjection() {
+        val card = CharacterCardCodec.decodeJson("""{"name":"林舟","description":"一位旅人",
+            "character_book":{"token_budget":100,"entries":[
+                {"constant":true,"content":"WORLD_BOOK_ONLY","enabled":true}
+            ]}}""")
+        val context = roleplay().copy(card = card, contextWindow = null)
+        assertTrue(context.copy(contextWindow = 128_000)
+            .projectMessages(JSONArray().put(context.personaMessage())).toString().contains("WORLD_BOOK_ONLY"))
+        val result = AgentModelClient.complete(
+            config = config().copy(contextWindow = null), prompt = "同行", roleplayContext = context,
+            provider = provider { request ->
+                assertTrue(request.messages.toString().contains("林舟"))
+                assertFalse(request.messages.toString().contains("WORLD_BOOK_ONLY"))
+                reply("我们走吧。")
+            }, toolExecutor = { error("无需工具") },
+        )
+        assertEquals("我们走吧。", result.content)
+    }
+
+    @Test
     fun continuationPromptAndLaterSteeringKeepTheirUiSupplementIdentifiers() {
         val controller = AgentRunController()
         controller.steer("后一条补充")

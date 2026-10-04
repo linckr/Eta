@@ -76,7 +76,9 @@ internal class AgentRuntimeRunExecutor(
         val timing = AgentRunTiming(AndroidAgentLogger)
 
         val result = try {
-            val contextWindow = request.config.requireContextWindow()
+            val contextWindow = if (request.operation == AgentRuntimeWire.OP_COMPACT) {
+                request.config.requireContextWindow()
+            } else request.config.contextWindow?.takeIf { it > 0 }
             checkpointRecorder = AgentRunCheckpointRecorder.create(appContext, request)
             entrySurfaceGuard = EntrySurfaceGuard.from(
                 handoff = request.handoff,

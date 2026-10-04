@@ -26,6 +26,8 @@
         android:name="android.permission.QUERY_ALL_PACKAGES"
         tools:ignore="QueryAllPackagesPermission" />
     <uses-permission android:name="android.permission.VIBRATE" />
+    <permission android:name="io.github.mangi.eta.permission.BREENO_ASR" android:protectionLevel="signature" />
+    <uses-permission android:name="io.github.mangi.eta.permission.BREENO_ASR" />
 
     <permission
         android:name="io.github.mangi.eta.permission.CONTROL_ACCESSIBILITY_PROTECTION"

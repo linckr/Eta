@@ -97,7 +97,7 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
     private var resultCardParams: WindowManager.LayoutParams? = null
 
     private val state = mutableStateOf(AgentOverlayState.Initial)
-    private val collapsed = mutableStateOf(true)
+    private val collapsed = mutableStateOf(false)
     private var hasExecutedForegroundTool = false
     private val supplementsLock = Any()
     private val activeSupplements = mutableListOf<AgentUiHandoffPayload.Supplement>()
@@ -366,7 +366,7 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
         }
         mainHandler.removeCallbacksAndMessages(hideToken)
         state.value = AgentOverlayState.Initial
-        collapsed.value = true
+        collapsed.value = false
         hasExecutedForegroundTool = false
         synchronized(supplementsLock) {
             activeSupplements.clear()

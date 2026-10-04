@@ -1104,7 +1104,8 @@
   <string name="model_collapse_provider">收合 %1$s</string>
   <string name="model_expand_provider">展開 %1$s</string>
   <string name="context_no_previous_usage">暫無上輪用量</string>
-  <string name="context_no_model_limit">請先到設定 → 模型提供商填寫目前模型的上下文視窗大小。</string>
+  <string name="context_no_model_limit">上下文視窗未知，自動壓縮不可用。</string>
+  <string name="context_manual_window_required">手動壓縮前，請先到設定 → 模型提供商填寫目前模型的上下文視窗大小。</string>
   <string name="context_usage_after_response">完成首次回覆後顯示實測用量</string>
   <string name="context_usage_previous_response">%1$s\n上輪實測</string>
   <string name="context_compaction">上下文壓縮</string>
@@ -1319,4 +1320,6 @@
     <string name="system_notice_model_identity">模型識別核對（服務端自報）</string>
     <string name="model_identity_detail">請求送出的 Model ID：%1$s\n服務端回應的 model：%2$s</string>
     <string name="model_identity_not_reported">未提供（無法核驗）</string>
+    <string name="speech_asr_breeno">小布（實驗）</string>
+    <string name="speech_asr_note_breeno">透過 Eta 模組使用 ColorOS 小布識別。重新啟動後先喚醒一次小布，再回到 Eta 使用。無需另外填寫 API Key，識別使用小布服務和網絡。長語音及其他小布版本尚未驗證。</string>
 </resources>

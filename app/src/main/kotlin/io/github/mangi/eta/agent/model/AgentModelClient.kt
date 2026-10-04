@@ -109,6 +109,7 @@ internal object AgentModelClient {
         onEvent: (AgentEvent) -> Unit = {}
     ): ModelResponse.Text {
         config.validate()
+        if (compactOnly) config.requireContextWindow()
         val initialCapabilities = capabilitiesProvider()
         val messages = AgentPromptBuilder.buildInitialMessages(
             config,
@@ -230,7 +231,6 @@ internal object AgentModelClient {
             providerId == BuiltinProviders.OPENAI_CODEX_ID
         if (!usesCodexSubscription) require(apiKey.isNotBlank()) { "请先配置 API Key" }
         require(model.isNotBlank()) { "请先配置模型名" }
-        requireContextWindow()
         require(
             reasoningCapabilities?.mandatory != true ||
                 effectiveReasoningEffort != ReasoningEffort.OFF

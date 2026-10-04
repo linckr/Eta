@@ -42,6 +42,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material.icons.rounded.ExpandLess
+import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Stop
@@ -273,7 +275,8 @@ private fun AssistantOrb(
 
 /**
  * 运行时小气泡窗口：WRAP_CONTENT，跟随光球，窗口外触摸穿透。
- * 一句话状态 + 动作按钮 + 可展开补充输入。结束时由 Service 撤掉、改显结果卡片。
+ * 默认单行当前状态；点击状态收起，独立箭头展开动作按钮和补充输入。
+ * 优先显示服务已提供的最新一行推理；工具阶段显示工具状态，不自动展开任务历史。
  */
 @Composable
 internal fun AgentOverlayBubble(
@@ -293,6 +296,7 @@ internal fun AgentOverlayBubble(
     }
 
     var supplementMode by remember { mutableStateOf(false) }
+    var controlsExpanded by remember { mutableStateOf(false) }
     var supplementText by remember { mutableStateOf("") }
     val keyboard = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
@@ -330,7 +334,7 @@ internal fun AgentOverlayBubble(
     }
 
     val accent = phaseAccent(state.phase)
-    val statusText = state.status.localizedText()
+    val statusText = state.currentThinkingLine.ifBlank { state.status.localizedText() }
     val dotAlpha = rememberStatusDotPulse(active = state.phase == AgentOverlayPhase.RUNNING)
 
     AnimatedVisibility(
@@ -351,7 +355,7 @@ internal fun AgentOverlayBubble(
     ) {
         Card(
             modifier = Modifier
-                .widthIn(max = 136.dp),
+                .widthIn(max = 240.dp),
             cornerRadius = 16.dp,
             insideMargin = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
             colors = CardDefaults.defaultColors(
@@ -360,29 +364,65 @@ internal fun AgentOverlayBubble(
         ) {
             // 阶段色由圆点承载，状态文字保持中性；运行中圆点呼吸，暂停/结束静止
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(
+                Row(
                     modifier = Modifier
-                        .size(7.dp)
-                        .graphicsLayer(alpha = dotAlpha)
-                        .clip(CircleShape)
-                        .background(accent),
-                )
-                Spacer(modifier = Modifier.width(7.dp))
-                Text(
-                    text = statusText,
-                    color = MiuixTheme.colorScheme.onSurface,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Medium,
-                    maxLines = 2,
-                    lineHeight = 17.sp,
-                    overflow = TextOverflow.Ellipsis,
-                )
+                        .weight(1f)
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable {
+                            focusManager.clearFocus(force = true)
+                            keyboard?.hide()
+                            onSupplementModeChange(false)
+                            onCollapse()
+                        }
+                        .heightIn(min = 32.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(7.dp)
+                            .graphicsLayer(alpha = dotAlpha)
+                            .clip(CircleShape)
+                            .background(accent),
+                    )
+                    Spacer(modifier = Modifier.width(7.dp))
+                    Text(
+                        text = statusText,
+                        modifier = Modifier.weight(1f),
+                        color = MiuixTheme.colorScheme.onSurface,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        lineHeight = 17.sp,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                IconButton(
+                    onClick = {
+                        controlsExpanded = !controlsExpanded
+                        if (!controlsExpanded && supplementMode) {
+                            focusManager.clearFocus(force = true)
+                            keyboard?.hide()
+                            exitSupplementMode()
+                        }
+                    },
+                    backgroundColor = Color.Transparent,
+                    minWidth = 32.dp,
+                    minHeight = 32.dp,
+                    cornerRadius = 16.dp,
+                ) {
+                    Icon(
+                        imageVector = if (controlsExpanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
+                        contentDescription = stringResource(if (controlsExpanded) R.string.work_collapse else R.string.work_expand),
+                        modifier = Modifier.size(18.dp),
+                        tint = MiuixTheme.colorScheme.onSurfaceVariantActions,
+                    )
+                }
             }
 
-            Spacer(modifier = Modifier.height(10.dp))
+            if (controlsExpanded) Spacer(modifier = Modifier.height(10.dp))
 
             AnimatedVisibility(
-                visible = supplementMode,
+                visible = controlsExpanded && supplementMode,
                 enter = expandVertically(
                     animationSpec = spring(
                         dampingRatio = Spring.DampingRatioNoBouncy,
@@ -405,7 +445,7 @@ internal fun AgentOverlayBubble(
             }
 
             AnimatedVisibility(
-                visible = !supplementMode,
+                visible = controlsExpanded && !supplementMode,
                 enter = expandVertically(
                     animationSpec = spring(
                         dampingRatio = Spring.DampingRatioNoBouncy,

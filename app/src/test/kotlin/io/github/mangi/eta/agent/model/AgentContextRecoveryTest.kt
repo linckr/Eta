@@ -15,12 +15,31 @@ class AgentContextRecoveryTest {
     )
 
     @Test
-    fun missingOrInvalidWindowFailsBeforeAnyProviderRequest() {
+    fun missingOrInvalidWindowAllowsChatWithoutAutomaticCompaction() {
+        for (window in listOf(null, 0, -1)) {
+            var requests = 0
+            val events = mutableListOf<AgentEvent>()
+            val result = AgentModelClient.complete(config.copy(contextWindow = window), "继续",
+                AgentModelClient.ToolExecutor { error("不应执行工具") }, history = history(),
+                onEvent = events::add, provider = provider { request, emit ->
+                    requests++
+                    assertEquals(ProviderRequestPurpose.CHAT, request.purpose)
+                    emit(ProviderEvent.Usage(AgentTokenUsage(inputTokens = 9_000_000)))
+                    response("完成")
+                })
+            assertEquals("完成", result.content)
+            assertEquals(1, requests)
+            assertTrue(events.none { it is AgentEvent.ContextCompaction })
+        }
+    }
+
+    @Test
+    fun missingOrInvalidWindowStillRejectsManualCompactionBeforeProviderRequest() {
         for (window in listOf(null, 0, -1)) {
             val failure = assertThrows(AgentModelFailure::class.java) {
-                AgentModelClient.complete(config.copy(contextWindow = window), "继续",
-                    AgentModelClient.ToolExecutor { error("不应执行工具") },
-                    provider = provider { _, _ -> error("未设置窗口不能请求模型") })
+                AgentModelClient.complete(config.copy(contextWindow = window), "",
+                    AgentModelClient.ToolExecutor { error("不应执行工具") }, history = history(), compactOnly = true,
+                    provider = provider { _, _ -> error("未设置窗口不能手动压缩") })
             }
             assertEquals("CONTEXT_WINDOW_REQUIRED", failure.code)
             assertTrue(failure.message!!.contains("设置"))

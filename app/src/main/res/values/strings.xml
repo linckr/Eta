@@ -1137,7 +1137,8 @@
   <string name="model_collapse_provider">Collapse %1$s</string>
   <string name="model_expand_provider">Expand %1$s</string>
   <string name="context_no_previous_usage">No usage data yet</string>
-  <string name="context_no_model_limit">Set this model\'s context window in Settings → Model Providers first.</string>
+  <string name="context_no_model_limit">Context window unknown; automatic compaction unavailable.</string>
+  <string name="context_manual_window_required">Set this model\'s context window in Settings → Model Providers before compacting manually.</string>
   <string name="context_usage_after_response">Measured after the first response</string>
   <string name="context_usage_previous_response">%1$s\nMeasured last turn</string>
   <string name="context_usage_description">Context usage: %1$s</string>
@@ -1353,4 +1354,6 @@
     <string name="system_notice_model_identity">Model identity reported by provider</string>
     <string name="model_identity_detail">Requested Model ID: %1$s\nResponse model: %2$s</string>
     <string name="model_identity_not_reported">Not provided (cannot verify)</string>
+    <string name="speech_asr_breeno">XiaoBu (experimental)</string>
+    <string name="speech_asr_note_breeno">Uses XiaoBu on ColorOS through the Eta module. Wake XiaoBu once after a restart, then return to Eta. No separate API key is required. Recognition uses XiaoBu’s service and network. Long audio and other XiaoBu versions may not be supported.</string>
 </resources>

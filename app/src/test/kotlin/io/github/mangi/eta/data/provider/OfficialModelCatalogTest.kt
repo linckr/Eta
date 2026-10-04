@@ -10,10 +10,10 @@ import org.junit.Test
 
 class OfficialModelCatalogTest {
     @Test
-    fun catalogWindowIsMetadataUntilTheUserConfiguresAWindow() {
+    fun catalogWindowIsDefaultUntilTheUserOverridesIt() {
         val model = OfficialModelCatalog.modelsForProvider(BuiltinProviders.PROVIDERS.first()).first()
         assertTrue(model.contextWindow!! > 0)
-        assertNull(model.effectiveContextWindow)
+        assertEquals(model.contextWindow, model.effectiveContextWindow)
         assertEquals(64_000, model.copy(contextWindowOverride = 64_000).effectiveContextWindow)
     }
 

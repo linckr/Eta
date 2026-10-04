@@ -16,7 +16,7 @@ internal data class RoleplayRunContext(
     val card: CharacterCard,
     val userName: String,
     val userDescription: String,
-    val contextWindow: Int,
+    val contextWindow: Int?,
     val memory: AgentMemoryContext = AgentMemoryContext.DISABLED,
 ) {
     val characterName: String get() = card.name
@@ -33,7 +33,8 @@ internal data class RoleplayRunContext(
         val worldbook = CharacterWorldbook.resolve(
             card = card,
             messages = conversationText,
-            inputTokenBudget = contextWindow,
+            // Unknown model capacity cannot safely provide a window-based worldbook budget.
+            inputTokenBudget = contextWindow?.takeIf { it > 0 } ?: 0,
             estimateTokens = { CharacterWorldbook.estimateEntryTokens(expand(it)) },
         )
         val projected = (0 until source.length()).map { index ->
@@ -111,7 +112,7 @@ internal data class RoleplayRunContext(
         suspend fun resolve(
             context: Context,
             conversationId: String,
-            contextWindow: Int,
+            contextWindow: Int?,
             memoryEnabled: Boolean,
         ): RoleplayRunContext? {
             val raw = EtaDatabase.get(context).conversationDao().roleplayJson(conversationId)

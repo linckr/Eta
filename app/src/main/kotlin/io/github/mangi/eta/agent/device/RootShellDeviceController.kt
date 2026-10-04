@@ -13,7 +13,6 @@ import android.os.SystemClock
 import java.io.IOException
 import java.io.StringReader
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicLong
 import kotlin.concurrent.thread
 import org.json.JSONArray
 import org.json.JSONObject
@@ -123,18 +122,6 @@ internal class RootShellDeviceController(
                     truncated = accessibilitySnapshot.truncated,
                     accessibilitySnapshot = accessibilitySnapshot,
                 )
-            } else if (rootAvailable()) {
-                val rootNodes = dumpUiNodes(nodeLimit)
-                ElementObservation(
-                    id = "u${ROOT_OBSERVATION_IDS.incrementAndGet()}",
-                    source = ElementSource.UIAUTOMATOR,
-                    packageName = rootNodes.firstOrNull()?.packageName.orEmpty(),
-                    windowId = null,
-                    nodes = rootNodes,
-                    maxNodes = nodeLimit,
-                    truncated = rootNodes.size >= nodeLimit,
-                    treeSignature = uiTreeSignature(rootNodes),
-                )
             } else {
                 null
             }
@@ -168,7 +155,7 @@ internal class RootShellDeviceController(
                         if (accessibility != null) {
                             "节点来自无障碍服务，支持 tap_element、replace_text、clear_text、scroll_element 等稳定节点动作"
                         } else {
-                            "无障碍服务未启用，节点来自 uiautomator；坐标工具会回退到 Root Shell"
+                            "无障碍服务未启用，无法读取节点；请启用 Eta 无障碍服务。截图和 Root Shell 坐标操作仍可用"
                         }
                     )
             )
@@ -527,12 +514,8 @@ internal class RootShellDeviceController(
         while (System.currentTimeMillis() <= deadline) {
             attempts++
             val service = AgentAccessibilityService.current()
-            if (service == null && !rootAvailable()) return accessibilityUnavailable()
-            val nodes = service
-                ?.queryNodes(120)
-                ?.map { it.toUiNode() }
-                ?.takeIf { it.isNotEmpty() }
-                ?: if (rootAvailable()) dumpUiNodes(120) else emptyList()
+            if (service == null) return accessibilityUnavailable()
+            val nodes = service.queryNodes(120).map { it.toUiNode() }
             val match = nodes.firstOrNull { node ->
                 val haystacks = if (includeDesc) listOf(node.text, node.desc) else listOf(node.text)
                 haystacks.any { value -> matches(value, needle, matchMode) }
@@ -820,20 +803,10 @@ internal class RootShellDeviceController(
     }
 
     private fun dumpUiNodes(maxNodes: Int): List<UiNode> {
-        if (!rootAvailable()) return emptyList()
-        val result = runSuText(
-            "uiautomator dump --compressed /data/local/tmp/eta_window.xml >/dev/null && " +
-                "cat /data/local/tmp/eta_window.xml && rm -f /data/local/tmp/eta_window.xml",
-            timeoutSeconds = 10
-        )
-        if (result.exitCode != 0 || result.output.isBlank()) {
-            logger.warn(
-                "Agent device action=dump_ui outcome=failed source=root " +
-                    "exitCode=${result.exitCode} outputChars=${result.output.length}"
-            )
-            return emptyList()
-        }
-        return parseUiNodes(result.output, maxNodes)
+        // System UiAutomation disconnect freezes/thaws rotation. Even a read-only
+        // hierarchy dump can therefore alter the user's rotation preference.
+        logger.debug { "Agent device action=dump_ui outcome=unavailable reason=rotation_preservation" }
+        return emptyList()
     }
 
     private fun parseUiNodes(xml: String, maxNodes: Int): List<UiNode> {
@@ -994,26 +967,8 @@ internal class RootShellDeviceController(
         observation: ElementObservation,
         index: Int,
     ): ResolvedUiAutomatorNode? {
-        if (observation.source != ElementSource.UIAUTOMATOR) return null
-        val original = observation.nodes.firstOrNull { node -> node.index == index } ?: return null
-        val currentNodes = dumpUiNodes(observation.maxNodes)
-        if (uiTreeSignature(currentNodes) != observation.treeSignature) return null
-        val current = currentNodes.firstOrNull { node -> node.index == index } ?: return null
-        val matched = current.takeIf { candidate ->
-            candidate.packageName == original.packageName &&
-                candidate.className == original.className &&
-                candidate.viewId == original.viewId &&
-                candidate.text == original.text &&
-                candidate.desc == original.desc &&
-                candidate.bounds == original.bounds &&
-                candidate.clickable == original.clickable &&
-                candidate.longClickable == original.longClickable &&
-                candidate.scrollable == original.scrollable &&
-                candidate.editable == original.editable &&
-                candidate.password == original.password &&
-                candidate.enabled == original.enabled
-        }
-        return matched?.let { node -> ResolvedUiAutomatorNode(node, currentNodes) }
+        // Never reuse legacy root nodes after disabling the unsafe dump source.
+        return null
     }
 
     /**
@@ -1416,6 +1371,5 @@ internal class RootShellDeviceController(
         private const val MAX_INPUT_TEXT_CHARS = 1_000
         private const val MAX_REPLACE_TEXT_CHARS = 4_000
         private const val MAX_CLIPBOARD_TEXT_CHARS = 20_000
-        private val ROOT_OBSERVATION_IDS = AtomicLong(0)
     }
 }
