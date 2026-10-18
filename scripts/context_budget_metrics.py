@@ -14,13 +14,18 @@ Protocol (emitted by AgentContextSession):
   context_request_budget_fallback ... (legacy P0 mirror; ignored for counting)
 
 Metric definitions:
-  chat_rounds                       purpose=chat pre lines (one per request round)
+  chat_rounds                       purpose=chat preflight budget checks (one per pre line);
+                                    this is NOT the number of successful provider HTTP requests
   byte_only_attempts                terminal attempts with trigger=bytes
   byte_only_per_100_rounds          byte_only_attempts / chat_rounds * 100
   byte_only_wait_ms                 sum of duration_ms over byte-only terminal attempts
   byte_only_wait_ms_per_100_rounds  byte_only_wait_ms / chat_rounds * 100
   deferred_rounds                   rounds where signed Anthropic tool state deferred compaction
   fallback_rounds                   attempts that fell back to sending the original request
+
+decision_id deduplicates both pre-request rounds and terminal decisions across merged captures.
+orphan_decisions counts terminal/deferred events without a matching pre line; trigger_mismatches
+counts decisions whose trigger differs from the matching pre reason.
 
 Groups are keyed by the configured byte budget so the 512 KiB default run and the
 48 MiB control run can be compared from the same capture.
@@ -41,12 +46,13 @@ def fields(line: str) -> dict[str, str]:
     return {match.group("key"): match.group("value") for match in FIELD.finditer(line)}
 
 
-def parse(lines: list[str]) -> tuple[list[dict[str, str]], list[dict[str, str]], int, int]:
+def parse(lines: list[str]) -> tuple[list[dict[str, str]], list[dict[str, str]], dict[str, object]]:
     rounds: list[dict[str, str]] = []
-    decisions: list[dict[str, str]] = []
+    raw_decisions: list[dict[str, str]] = []
     legacy_without_phase = 0
     duplicate_pre_lines = 0
-    seen_decision_ids: set[str] = set()
+    seen_pre_ids: set[str] = set()
+    pre_reason_by_id: dict[str, str] = {}
     for line in lines:
         if "context_request_budget " in line and "reason=" in line:
             entry = fields(line)
@@ -59,16 +65,46 @@ def parse(lines: list[str]) -> tuple[list[dict[str, str]], list[dict[str, str]],
             elif phase == "pre":
                 decision_id = entry.get("decision_id")
                 if decision_id:
-                    if decision_id in seen_decision_ids:
+                    if decision_id in seen_pre_ids:
                         duplicate_pre_lines += 1
                         continue
-                    seen_decision_ids.add(decision_id)
+                    seen_pre_ids.add(decision_id)
+                    pre_reason_by_id[decision_id] = entry.get("reason", "")
                 rounds.append(entry)
         if "context_budget_decision purpose=" in line:
             entry = fields(line)
             if entry.get("purpose") == "chat":
-                decisions.append(entry)
-    return rounds, decisions, legacy_without_phase, duplicate_pre_lines
+                raw_decisions.append(entry)
+
+    decisions: list[dict[str, str]] = []
+    duplicate_terminal_decisions = 0
+    decisions_without_id = 0
+    seen_terminal_ids: set[str] = set()
+    for decision in raw_decisions:
+        decision_id = decision.get("decision_id")
+        if decision_id:
+            if decision_id in seen_terminal_ids:
+                duplicate_terminal_decisions += 1
+                continue
+            seen_terminal_ids.add(decision_id)
+        else:
+            decisions_without_id += 1
+        decisions.append(decision)
+
+    orphan_decisions = [d for d in decisions
+                        if d.get("decision_id") and d["decision_id"] not in pre_reason_by_id]
+    trigger_mismatches = [d for d in decisions
+                          if d.get("decision_id") in pre_reason_by_id
+                          and d.get("trigger") != pre_reason_by_id[d["decision_id"]]]
+    stats: dict[str, object] = {
+        "legacy_budget_lines_without_phase": legacy_without_phase,
+        "duplicate_pre_budget_lines_ignored": duplicate_pre_lines,
+        "duplicate_terminal_decisions_ignored": duplicate_terminal_decisions,
+        "decisions_without_decision_id": decisions_without_id,
+        "orphan_decisions": len(orphan_decisions),
+        "trigger_mismatches": len(trigger_mismatches),
+    }
+    return rounds, decisions, stats
 
 
 def duration_ms(decision: dict[str, str]) -> int:
@@ -83,7 +119,7 @@ def per_100(value: float, rounds: int) -> float:
 
 
 def summarize(lines: list[str]) -> dict[str, object]:
-    rounds, decisions, legacy_without_phase, duplicate_pre_lines = parse(lines)
+    rounds, decisions, stats = parse(lines)
     attempts = [d for d in decisions if d.get("action") in ATTEMPT_ACTIONS]
     deferred = [d for d in decisions if d.get("action") == DEFERRED_ACTION]
     byte_attempts = [d for d in attempts if d.get("trigger") == "bytes"]
@@ -119,9 +155,9 @@ def summarize(lines: list[str]) -> dict[str, object]:
 
     return {
         "scope": "preflight_only",
+        "chat_rounds_definition": "preflight_budget_checks",
         "chat_rounds": len(rounds),
-        "legacy_budget_lines_without_phase": legacy_without_phase,
-        "duplicate_pre_budget_lines_ignored": duplicate_pre_lines,
+        **stats,
         "byte_only_attempts": len(byte_attempts),
         "byte_only_per_100_rounds": per_100(len(byte_attempts), len(rounds)),
         "byte_only_wait_ms": byte_wait,

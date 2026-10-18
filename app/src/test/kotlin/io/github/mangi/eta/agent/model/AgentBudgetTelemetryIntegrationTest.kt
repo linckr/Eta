@@ -54,6 +54,7 @@ class AgentBudgetTelemetryIntegrationTest {
         assertEquals("bytes", done.single()["trigger"])
         assertEquals("preflight", done.single()["source"])
         assertTrue(done.single().containsKey("decision_id"))
+        assertEquals(preDecisionId(), done.single()["decision_id"])
         assertEquals(1, terminalEntries().size)
     }
 
@@ -72,6 +73,7 @@ class AgentBudgetTelemetryIntegrationTest {
         assertEquals(1, fallback.size)
         assertTrue(fallback.single().getValue("duration_ms").toLong() >= 0)
         assertEquals("CONTEXT_SUMMARY_TIMEOUT", fallback.single()["code"])
+        assertEquals(preDecisionId(), fallback.single()["decision_id"])
         assertEquals(1, terminalEntries().size)
         assertEquals(1, legacyFallbackLines("send_original_after_summary_failure"))
     }
@@ -115,6 +117,7 @@ class AgentBudgetTelemetryIntegrationTest {
         assertEquals("token", hard.single()["trigger"])
         assertEquals("HTTP_400", hard.single()["code"])
         assertTrue(hard.single().getValue("duration_ms").toLong() >= 0)
+        assertEquals(preDecisionId(), hard.single()["decision_id"])
         assertEquals(1, terminalEntries().size)
     }
 
@@ -149,6 +152,7 @@ class AgentBudgetTelemetryIntegrationTest {
         val deferred = decisions("deferred")
         assertEquals(1, deferred.size)
         assertEquals("SIGNED_TOOL_ROUND", deferred.single()["code"])
+        assertEquals(preDecisionId(), deferred.single()["decision_id"])
         assertTrue(terminalEntries().isEmpty())
         assertEquals(0, legacyLines().size)
     }
@@ -216,6 +220,9 @@ class AgentBudgetTelemetryIntegrationTest {
 
     private fun budgetLines(phase: String) =
         collected("context_request_budget").count { fields(it)["phase"] == phase }
+
+    private fun preDecisionId(): String =
+        fields(collected("context_request_budget").first { fields(it)["phase"] == "pre" }).getValue("decision_id")
 
     private fun legacyFallbackLines(action: String) =
         collected("context_request_budget_fallback").count { fields(it)["action"] == action }
