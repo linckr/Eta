@@ -4,20 +4,26 @@
 Usage:
     python scripts/context_budget_metrics.py <logcat.txt> [more.txt ...]
 
-The app emits one `context_request_budget` line per outgoing request round and one
-`context_budget_decision` line per pre-request pressure decision (read-only telemetry).
-Only `purpose=chat` is aggregated here.
+Protocol (emitted by AgentContextSession):
+  context_request_budget phase=pre|post purpose=chat ... reason=...
+      One pre line per chat request round; post only after a successful compaction.
+  context_budget_decision purpose=chat trigger=bytes|token|both essential=...
+      action=compact_done|fallback|soft_noop|hard_failure|deferred ...
+      One terminal line per actual compaction attempt (with duration_ms), or one
+      deferred line when the signed tool round blocks compaction (not an attempt).
+  context_request_budget_fallback ... (legacy P0 mirror; ignored for counting)
 
-Reported metrics:
-  chat_rounds                         denominator for the per-100-round metrics
-  non_essential_attempts              compactions triggered by byte-only soft pressure
-  non_essential_per_100_rounds        the number P1 must drive down
-  non_essential_wait_ms               wall-clock the user waited before a chat request
-  non_essential_wait_ms_per_100_rounds
-  essential_*                         token/capacity pressure for comparison
+Metric definitions:
+  chat_rounds                       purpose=chat pre lines (one per request round)
+  byte_only_attempts                terminal attempts with trigger=bytes
+  byte_only_per_100_rounds          byte_only_attempts / chat_rounds * 100
+  byte_only_wait_ms                 sum of duration_ms over byte-only terminal attempts
+  byte_only_wait_ms_per_100_rounds  byte_only_wait_ms / chat_rounds * 100
+  deferred_rounds                   rounds where signed Anthropic tool state deferred compaction
+  fallback_rounds                   attempts that fell back to sending the original request
 
-A successful compaction logs both compact_started (attempt) and compact_done
-(duration); a failed/no-op attempt logs one line with its own duration.
+Groups are keyed by the configured byte budget so the 512 KiB default run and the
+48 MiB control run can be compared from the same capture.
 """
 
 from __future__ import annotations
@@ -27,27 +33,45 @@ import sys
 from collections import Counter
 
 FIELD = re.compile(r"(?P<key>[A-Za-z_]+)=(?P<value>\S+)")
-ATTEMPT_ACTIONS = {"compact_started", "fallback", "soft_noop", "hard_failure", "deferred"}
-WAIT_ACTIONS = {"compact_done", "fallback", "soft_noop", "hard_failure"}
+ATTEMPT_ACTIONS = {"compact_done", "fallback", "soft_noop", "hard_failure"}
+DEFERRED_ACTION = "deferred"
 
 
-def parse(lines: list[str]) -> tuple[int, list[dict[str, str]]]:
-    rounds = 0
+def fields(line: str) -> dict[str, str]:
+    return {match.group("key"): match.group("value") for match in FIELD.finditer(line)}
+
+
+def parse(lines: list[str]) -> tuple[list[dict[str, str]], list[dict[str, str]], int, int]:
+    rounds: list[dict[str, str]] = []
     decisions: list[dict[str, str]] = []
+    legacy_without_phase = 0
+    duplicate_pre_lines = 0
+    seen_decision_ids: set[str] = set()
     for line in lines:
-        if "context_request_budget purpose=" in line and "reason=" in line:
-            rounds += 1
-        if "context_budget_decision purpose=" not in line:
-            continue
-        fields = {m.group("key"): m.group("value") for m in FIELD.finditer(line)}
-        if fields.get("purpose") == "chat":
-            decisions.append(fields)
-    return rounds, decisions
+        if "context_request_budget " in line and "reason=" in line:
+            entry = fields(line)
+            if entry.get("purpose") != "chat":
+                continue
+            phase = entry.get("phase")
+            if phase is None:
+                legacy_without_phase += 1
+                rounds.append(entry)
+            elif phase == "pre":
+                decision_id = entry.get("decision_id")
+                if decision_id:
+                    if decision_id in seen_decision_ids:
+                        duplicate_pre_lines += 1
+                        continue
+                    seen_decision_ids.add(decision_id)
+                rounds.append(entry)
+        if "context_budget_decision purpose=" in line:
+            entry = fields(line)
+            if entry.get("purpose") == "chat":
+                decisions.append(entry)
+    return rounds, decisions, legacy_without_phase, duplicate_pre_lines
 
 
 def duration_ms(decision: dict[str, str]) -> int:
-    if decision.get("action") not in WAIT_ACTIONS:
-        return 0
     try:
         return max(0, int(decision.get("duration_ms", "0")))
     except ValueError:
@@ -59,25 +83,57 @@ def per_100(value: float, rounds: int) -> float:
 
 
 def summarize(lines: list[str]) -> dict[str, object]:
-    rounds, decisions = parse(lines)
-    essential = [d for d in decisions if d.get("essential") == "true"]
-    non_essential = [d for d in decisions if d.get("essential") == "false"]
-    attempts = [d for d in non_essential if d.get("action") in ATTEMPT_ACTIONS]
-    wait_ms = sum(duration_ms(d) for d in non_essential)
-    essential_wait_ms = sum(duration_ms(d) for d in essential)
+    rounds, decisions, legacy_without_phase, duplicate_pre_lines = parse(lines)
+    attempts = [d for d in decisions if d.get("action") in ATTEMPT_ACTIONS]
+    deferred = [d for d in decisions if d.get("action") == DEFERRED_ACTION]
+    byte_attempts = [d for d in attempts if d.get("trigger") == "bytes"]
+    byte_wait = sum(duration_ms(d) for d in byte_attempts)
+    essential_attempts = [d for d in attempts if d.get("essential") == "true"]
+
+    groups: dict[str, dict[str, int]] = {}
+    for entry in rounds:
+        group = groups.setdefault(entry.get("byte_budget", "unknown"), {
+            "chat_rounds": 0, "byte_only_attempts": 0, "byte_only_wait_ms": 0,
+            "fallback_rounds": 0, "deferred_rounds": 0,
+        })
+        group["chat_rounds"] += 1
+    for decision in attempts:
+        group = groups.setdefault(decision.get("byte_budget", "unknown"), {
+            "chat_rounds": 0, "byte_only_attempts": 0, "byte_only_wait_ms": 0,
+            "fallback_rounds": 0, "deferred_rounds": 0,
+        })
+        if decision.get("trigger") == "bytes":
+            group["byte_only_attempts"] += 1
+            group["byte_only_wait_ms"] += duration_ms(decision)
+        if decision.get("action") == "fallback":
+            group["fallback_rounds"] += 1
+    for decision in deferred:
+        group = groups.setdefault(decision.get("byte_budget", "unknown"), {
+            "chat_rounds": 0, "byte_only_attempts": 0, "byte_only_wait_ms": 0,
+            "fallback_rounds": 0, "deferred_rounds": 0,
+        })
+        group["deferred_rounds"] += 1
+    for group in groups.values():
+        group["byte_only_per_100_rounds"] = per_100(group["byte_only_attempts"], group["chat_rounds"])
+        group["byte_only_wait_ms_per_100_rounds"] = per_100(group["byte_only_wait_ms"], group["chat_rounds"])
+
     return {
-        "chat_rounds": rounds,
-        "decision_lines": len(decisions),
-        "non_essential_attempts": len(attempts),
-        "non_essential_per_100_rounds": per_100(len(attempts), rounds),
-        "non_essential_wait_ms": wait_ms,
-        "non_essential_wait_ms_per_100_rounds": per_100(wait_ms, rounds),
-        "non_essential_actions": dict(Counter(d.get("action", "?") for d in non_essential)),
-        "non_essential_codes": dict(Counter(d["code"] for d in non_essential if "code" in d)),
-        "essential_attempts": sum(1 for d in essential if d.get("action") in ATTEMPT_ACTIONS),
-        "essential_wait_ms": essential_wait_ms,
-        "essential_codes": dict(Counter(d["code"] for d in essential if "code" in d)),
-        "triggers": dict(Counter(d.get("trigger", "?") for d in decisions)),
+        "scope": "preflight_only",
+        "chat_rounds": len(rounds),
+        "legacy_budget_lines_without_phase": legacy_without_phase,
+        "duplicate_pre_budget_lines_ignored": duplicate_pre_lines,
+        "byte_only_attempts": len(byte_attempts),
+        "byte_only_per_100_rounds": per_100(len(byte_attempts), len(rounds)),
+        "byte_only_wait_ms": byte_wait,
+        "byte_only_wait_ms_per_100_rounds": per_100(byte_wait, len(rounds)),
+        "deferred_rounds": len(deferred),
+        "fallback_rounds": sum(1 for d in attempts if d.get("action") == "fallback"),
+        "essential_attempts": len(essential_attempts),
+        "essential_wait_ms": sum(duration_ms(d) for d in essential_attempts),
+        "attempts_by_trigger": dict(Counter(d.get("trigger", "?") for d in attempts)),
+        "attempts_by_action": dict(Counter(d.get("action", "?") for d in attempts)),
+        "attempts_by_code": dict(Counter(d["code"] for d in attempts if "code" in d)),
+        "groups": groups,
     }
 
 
@@ -94,7 +150,18 @@ def main(paths: list[str]) -> int:
         return 2
     summary = summarize(lines)
     for key, value in summary.items():
+        if key == "groups":
+            continue
         print(f"{key}={value}")
+    for budget, group in sorted(summary["groups"].items()):
+        prefix = f"group byte_budget={budget}"
+        print(f"{prefix} chat_rounds={group['chat_rounds']}")
+        print(f"{prefix} byte_only_attempts={group['byte_only_attempts']}")
+        print(f"{prefix} byte_only_per_100_rounds={per_100(group['byte_only_attempts'], group['chat_rounds'])}")
+        print(f"{prefix} byte_only_wait_ms={group['byte_only_wait_ms']}")
+        print(f"{prefix} byte_only_wait_ms_per_100_rounds={per_100(group['byte_only_wait_ms'], group['chat_rounds'])}")
+        print(f"{prefix} fallback_rounds={group['fallback_rounds']}")
+        print(f"{prefix} deferred_rounds={group['deferred_rounds']}")
     return 0
 
 

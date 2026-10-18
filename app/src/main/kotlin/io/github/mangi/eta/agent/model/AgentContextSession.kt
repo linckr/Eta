@@ -1,8 +1,9 @@
 package io.github.mangi.eta.agent.model
 
 import io.github.mangi.eta.agent.runtime.AgentEvent
+import io.github.mangi.eta.agent.runtime.AgentRunCancelledException
 import io.github.mangi.eta.agent.runtime.AgentRunController
-import io.github.mangi.eta.core.AndroidAgentLogger
+import io.github.mangi.eta.core.toSafeLogToken
 import org.json.JSONArray
 
 /** 管理可替换的模型上下文；持久快照先提交，运行 transcript 始终追加。 */
@@ -22,6 +23,7 @@ internal class AgentContextSession(
     private val compactionSupport: AgentCompactionSupport = AgentCompactionSupport(),
     private val requestTools: () -> JSONArray = { JSONArray() },
     private val projectRequest: (JSONArray) -> JSONArray = { it },
+    private val onBudgetLog: (String) -> Unit = AgentBudgetTelemetry::log,
 ) {
     private val contextWindow = AgentContextBudget.inputBudget(config, requestPurpose)
     private var inputTokens: Int? = null
@@ -41,6 +43,7 @@ internal class AgentContextSession(
         val requestBytes: Long?,
         val byteBudget: Int,
         val startedAt: Long,
+        val decisionId: String,
     )
 
     fun snapshot(): AgentContextSnapshot? = committedSnapshot
@@ -57,11 +60,12 @@ internal class AgentContextSession(
             inputTokens?.let { it >= window * TRIGGER_RATIO } == true)
         val bytePressure = byteBudget > 0 && requestBytes?.let { it > byteBudget.toLong() } == true
         val reason = budgetReason(tokenPressure, bytePressure)
-        logBudget(estimatedTokens, requestBytes, window, byteBudget, reason)
+        val decisionId = newDecisionId()
+        logBudget("pre", estimatedTokens, requestBytes, window, byteBudget, reason, decisionId)
         if (AnthropicEphemeralState.hasPendingToolResponse(messages)) {
             if (tokenPressure || bytePressure) {
                 logDecision(reason, "deferred", estimatedTokens, window, requestBytes, byteBudget,
-                    failureCode = "SIGNED_TOOL_ROUND")
+                    failureCode = "SIGNED_TOOL_ROUND", decisionId = decisionId)
             }
             return false
         }
@@ -77,7 +81,7 @@ internal class AgentContextSession(
                 "bytes" -> "CONTEXT_REQUEST_BYTE_BUDGET"
                 else -> "CONTEXT_TOKEN_BUDGET"
             })
-            pendingCompaction = PendingCompaction(reason, estimatedTokens, window, requestBytes, byteBudget, startedAt)
+            pendingCompaction = PendingCompaction(reason, estimatedTokens, window, requestBytes, byteBudget, startedAt, decisionId)
             return true
         } catch (failure: AgentModelFailure) {
             val elapsedMs = (compactionSupport.clock() - startedAt).coerceAtLeast(0)
@@ -85,7 +89,8 @@ internal class AgentContextSession(
             // leaves the exact original request intact for the provider to decide.
             if (failure.code in SOFT_COMPACTION_FAILURES) {
                 logDecision(reason, "soft_noop", estimatedTokens, window, requestBytes, byteBudget,
-                    failureCode = failure.code, elapsedMs = elapsedMs)
+                    failureCode = failure.code, elapsedMs = elapsedMs, decisionId = decisionId)
+                logLegacyFallback("send_original", reason, failure.code, requestBytes, byteBudget)
                 return false
             }
             // Byte-only pressure is a local upload preference, not evidence of provider
@@ -94,11 +99,20 @@ internal class AgentContextSession(
             // storage-related failures still propagate, so new failure codes fail closed.
             if (reason == "bytes" && byteFallbackEligible(failure)) {
                 logDecision(reason, "fallback", estimatedTokens, window, requestBytes, byteBudget,
-                    failureCode = failure.code, elapsedMs = elapsedMs)
+                    failureCode = failure.code, elapsedMs = elapsedMs, decisionId = decisionId)
+                logLegacyFallback("send_original_after_summary_failure", reason, failure.code, requestBytes, byteBudget)
                 return false
             }
             logDecision(reason, "hard_failure", estimatedTokens, window, requestBytes, byteBudget,
-                failureCode = failure.code, elapsedMs = elapsedMs)
+                failureCode = failure.code, elapsedMs = elapsedMs, decisionId = decisionId)
+            throw failure
+        } catch (failure: Exception) {
+            // Cancellation and unexpected non-summary failures must still end this attempt on a
+            // terminal telemetry line, then propagate unchanged.
+            val code = if (failure is AgentRunCancelledException) "RUN_CANCELLED" else "COMPACTION_ABORTED"
+            logDecision(reason, "hard_failure", estimatedTokens, window, requestBytes, byteBudget,
+                failureCode = code, elapsedMs = (compactionSupport.clock() - startedAt).coerceAtLeast(0),
+                decisionId = decisionId)
             throw failure
         }
     }
@@ -106,18 +120,30 @@ internal class AgentContextSession(
     fun reportRequestBudget(estimatedTokens: Int, requestBytes: Long) {
         val window = AgentContextBudget.inputBudget(config, requestPurpose)
         val byteBudget = requestByteBudget()
-        pendingCompaction?.let { pending ->
-            logDecision(pending.trigger, "compact_done", pending.estimatedTokens, pending.inputBudget,
-                pending.requestBytes, pending.byteBudget,
-                elapsedMs = (compactionSupport.clock() - pending.startedAt).coerceAtLeast(0),
-                tokensAfter = estimatedTokens, bytesAfter = requestBytes)
-            pendingCompaction = null
-        }
-        logBudget(estimatedTokens, requestBytes, window, byteBudget, budgetReason(
+        val pending = pendingCompaction
+        logBudget("post", estimatedTokens, requestBytes, window, byteBudget, budgetReason(
             window != null && (estimatedTokens >= window * TRIGGER_RATIO ||
                 inputTokens?.let { it >= window * TRIGGER_RATIO } == true),
             byteBudget > 0 && requestBytes > byteBudget.toLong(),
-        ))
+        ), pending?.decisionId)
+        pending?.let {
+            logDecision(it.trigger, "compact_done", it.estimatedTokens, it.inputBudget,
+                it.requestBytes, it.byteBudget,
+                elapsedMs = (compactionSupport.clock() - it.startedAt).coerceAtLeast(0),
+                tokensAfter = estimatedTokens, bytesAfter = requestBytes, decisionId = it.decisionId)
+            pendingCompaction = null
+        }
+    }
+
+    /** Terminal telemetry for a successful compaction whose post-compaction measurement failed. */
+    fun reportRequestBudgetFailure(failure: Throwable) {
+        val pending = pendingCompaction ?: return
+        val code = if (failure is AgentRunCancelledException) "POST_BUDGET_CANCELLED" else "POST_BUDGET_FAILURE"
+        logDecision(pending.trigger, "compact_done", pending.estimatedTokens, pending.inputBudget,
+            pending.requestBytes, pending.byteBudget, failureCode = code,
+            elapsedMs = (compactionSupport.clock() - pending.startedAt).coerceAtLeast(0),
+            decisionId = pending.decisionId)
+        pendingCompaction = null
     }
 
     private fun budgetReason(tokens: Boolean, bytes: Boolean): String = when {
@@ -130,10 +156,17 @@ internal class AgentContextSession(
     private fun requestByteBudget(): Int =
         config.requestByteBudget?.takeIf { it >= 0 } ?: DEFAULT_REQUEST_BYTE_BUDGET
 
-    private fun logBudget(estimatedTokens: Int, requestBytes: Long?, window: Int?, byteBudget: Int, reason: String) {
-        runCatching { AndroidAgentLogger.info("context_request_budget purpose=${requestPurpose.name.lowercase()} " +
+    private fun logBudget(phase: String, estimatedTokens: Int, requestBytes: Long?, window: Int?, byteBudget: Int, reason: String, decisionId: String? = null) {
+        emit("context_request_budget phase=$phase purpose=${requestPurpose.name.lowercase()} " +
             "estimated_tokens=$estimatedTokens input_budget=${window ?: "unknown"} " +
-            "request_bytes=${requestBytes ?: "unknown"} byte_budget=$byteBudget reason=$reason") }
+            "request_bytes=${requestBytes ?: "unknown"} byte_budget=$byteBudget reason=$reason" +
+            (decisionId?.let { " decision_id=$it" } ?: ""))
+    }
+
+    /** Transitional mirror of the P0 line for existing log consumers; new metrics use the decision line. */
+    private fun logLegacyFallback(action: String, trigger: String, code: String, requestBytes: Long?, byteBudget: Int) {
+        emit("context_request_budget_fallback purpose=${requestPurpose.name.lowercase()} trigger=$trigger " +
+            "action=$action code=${code.toSafeLogToken()} request_bytes=${requestBytes ?: "unknown"} byte_budget=$byteBudget")
     }
 
     private fun logDecision(
@@ -147,8 +180,9 @@ internal class AgentContextSession(
         elapsedMs: Long? = null,
         tokensAfter: Int? = null,
         bytesAfter: Long? = null,
+        decisionId: String? = null,
     ) {
-        AgentBudgetTelemetry.log(AgentBudgetTelemetry.line(
+        emit(AgentBudgetTelemetry.line(
             purpose = requestPurpose.name,
             trigger = trigger,
             action = action,
@@ -160,7 +194,15 @@ internal class AgentContextSession(
             elapsedMs = elapsedMs,
             tokensAfter = tokensAfter,
             bytesAfter = bytesAfter,
+            decisionId = decisionId,
         ))
+    }
+
+    private fun newDecisionId(): String =
+        java.util.UUID.randomUUID().toString().replace("-", "").take(12)
+
+    private fun emit(line: String) {
+        runCatching { onBudgetLog(line) }
     }
 
     fun userAppended() {

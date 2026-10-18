@@ -34,6 +34,7 @@ internal class AgentLoop(
     private val roleplayContext: RoleplayRunContext? = null,
     initialSupplementIndex: Int = 0,
     compactionSupport: AgentCompactionSupport = AgentCompactionSupport(),
+    private val onBudgetLog: (String) -> Unit = AgentBudgetTelemetry::log,
 ) {
     data class Result(
         val content: String,
@@ -59,6 +60,7 @@ internal class AgentLoop(
         compactionSupport = compactionSupport,
         requestTools = { currentRequestTools },
         projectRequest = { candidate -> AssistantScreenContextProjection.project(roleplayContext?.projectMessages(candidate) ?: candidate) },
+        onBudgetLog = onBudgetLog,
     )
     private var supplementIndex = initialSupplementIndex
 
@@ -115,13 +117,20 @@ internal class AgentLoop(
             if (purpose.allowsTools) {
                 val budget = AgentRequestBudget.evaluate(config, requestMessages, roundTools, purpose)
                 if (context.prepareForRequest(budget.estimatedTokens, budget.requestBytes)) {
-                    requestMessages = AssistantScreenContextProjection.project(
-                        roleplayContext?.projectMessages(messages) ?: messages,
-                    )
                     // Re-evaluate the new request with this API's actual builder. A soft budget
                     // does not permit another compaction loop or rejection of the remaining tail.
-                    val compactedBudget = AgentRequestBudget.evaluate(config, requestMessages, roundTools, purpose)
-                    context.reportRequestBudget(compactedBudget.estimatedTokens, compactedBudget.requestBytes)
+                    try {
+                        requestMessages = AssistantScreenContextProjection.project(
+                            roleplayContext?.projectMessages(messages) ?: messages,
+                        )
+                        val compactedBudget = AgentRequestBudget.evaluate(config, requestMessages, roundTools, purpose)
+                        context.reportRequestBudget(compactedBudget.estimatedTokens, compactedBudget.requestBytes)
+                    } catch (failure: Exception) {
+                        // The attempt succeeded, but the post-compaction projection/measurement did not.
+                        // Record its terminal telemetry exactly once before propagating unchanged.
+                        context.reportRequestBudgetFailure(failure)
+                        throw failure
+                    }
                 }
             }
             var roundInputTokens: Int? = null

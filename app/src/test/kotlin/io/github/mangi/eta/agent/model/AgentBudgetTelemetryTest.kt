@@ -25,6 +25,7 @@ class AgentBudgetTelemetryTest {
         assertTrue(line.contains("request_bytes=188516"))
         assertTrue(line.contains("byte_budget=1024"))
         assertTrue(line.contains("duration_ms=431"))
+        assertTrue(line.contains("source=preflight"))
         assertParsableWithoutContent(line)
     }
 

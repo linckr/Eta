@@ -24,6 +24,8 @@ internal object AgentBudgetTelemetry {
         elapsedMs: Long? = null,
         tokensAfter: Int? = null,
         bytesAfter: Long? = null,
+        source: String = "preflight",
+        decisionId: String? = null,
     ): String = buildString {
         append("context_budget_decision purpose=").append(purpose.lowercase())
         append(" trigger=").append(trigger)
@@ -37,6 +39,8 @@ internal object AgentBudgetTelemetry {
         elapsedMs?.let { append(" duration_ms=").append(it.coerceAtLeast(0)) }
         tokensAfter?.let { append(" tokens_after=").append(it) }
         bytesAfter?.let { append(" bytes_after=").append(it) }
+        append(" source=").append(source)
+        decisionId?.let { append(" decision_id=").append(it) }
     }
 
     fun log(line: String) {
