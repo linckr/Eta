@@ -140,7 +140,7 @@ class AgentContextBudgetTest {
         assertEquals("keep current request", history.getJSONObject(1).getString("content"))
     }
 
-    @Test fun rawTimeoutRetriesOnlySmallerPendingPartAndKeepsValidatedPrefix() {
+    @Test fun rawTimeoutRetriesSamePendingPartWithoutShrinkingAndKeepsValidatedPrefix() {
         val inputs = mutableListOf<String>()
         val provider = provider { request ->
             inputs += request.messages.getJSONObject(1).getString("content")
@@ -160,7 +160,9 @@ class AgentContextBudgetTest {
         assertEquals("BEGIN" + "x".repeat(9_000) + "END", rebuilt)
         assertTrue(inputs[1].contains("summary-1"))
         assertTrue(inputs[2].contains("summary-1"))
-        assertTrue(inputs[2].length < inputs[1].length)
+        // A slow response is not capacity evidence (AgentCompactionSlicePolicy): the pending
+        // slice is retried unchanged on a fresh connection instead of being shrunk.
+        assertEquals(inputs[1], inputs[2])
         assertEquals("summary-${inputs.size}", result)
     }
 

@@ -15,7 +15,7 @@ class AgentContextSummarizerRecoveryTest {
     private val firstTrace = "12345678-1234-1234-1234-123456789abc"
     private val secondTrace = "87654321-4321-4321-4321-cba987654321"
 
-    @Test fun timeoutShrinksOnlyCurrentSliceAndUsesFreshConnection() {
+    @Test fun timeoutRetriesSameSliceOnFreshConnectionWithoutShrinking() {
         val requests = mutableListOf<ProviderRequest>()
         val events = mutableListOf<AgentEvent>()
         val summarizer = AgentContextSummarizer(config, provider { request ->
@@ -27,7 +27,9 @@ class AgentContextSummarizerRecoveryTest {
         assertEquals("完整摘要", summarizer.summarize(history(70_000)))
         assertFalse(requests[0].freshConnection)
         assertTrue(requests[1].freshConnection)
-        assertTrue(slice(requests[1]).length < slice(requests[0]).length)
+        // Slow response is not capacity evidence (AgentCompactionSlicePolicy): the same pending
+        // slice is retried on a fresh connection, only capacity failures shrink the slice.
+        assertEquals(slice(requests[0]), slice(requests[1]))
         assertEquals(0, contentFragment(requests[1]).getInt("start"))
         assertTrue(contentFragment(requests[0]).getString("value").startsWith(contentFragment(requests[1]).getString("value")))
         assertTrue(requests.drop(2).all { !it.freshConnection })
