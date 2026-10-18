@@ -245,6 +245,95 @@ class AgentRequestByteCompactionTest {
             .single { it.phase == AgentEvent.ContextCompaction.PHASE_STARTED }.reasonCode)
     }
 
+    @Test fun tokenAndBytePressureSummaryFailureDoesNotUseByteOnlyFallback() {
+        val bothConfig = AgentModelClient.ModelConfig(
+            baseUrl = "https://example.invalid", apiKey = "fixture", model = "fixture", systemPrompt = "fixed",
+            contextWindow = 8_000, requestByteBudget = 16_000,
+        )
+        val messages = messages(30_000)
+        val original = messages.toString()
+        var chats = 0
+        val loop = AgentLoop(bothConfig, messages, JSONArray(), provider { request ->
+            if (request.purpose == ProviderRequestPurpose.COMPACTION) {
+                throw AgentModelFailure("CONTEXT_SUMMARY_TIMEOUT", false, "fixture summary timeout")
+            }
+            chats++
+            response("complete")
+        }, { error("No local tool replay") }, AgentRunController(), AgentTraceFormatter(), {}, systemCount = 1)
+
+        val failure = assertThrows(AgentModelFailure::class.java) { loop.run() }
+
+        assertEquals("CONTEXT_SUMMARY_TIMEOUT", failure.code)
+        assertEquals(0, chats)
+        assertEquals(original, messages.toString())
+        assertNull(loop.contextSnapshot())
+    }
+
+    @Test fun unknownFailureCodeStillPropagatesUnderByteOnlyPressure() {
+        val messages = messages(20_000)
+        val original = messages.toString()
+        var chats = 0
+        val loop = AgentLoop(config.copy(requestByteBudget = 16_000), messages, JSONArray(), provider { request ->
+            if (request.purpose == ProviderRequestPurpose.COMPACTION) {
+                throw AgentModelFailure("CONTEXT_SUMMARY_UNKNOWN_FUTURE_FAILURE", false, "fixture unknown failure")
+            }
+            chats++
+            response("complete")
+        }, { error("No local tool replay") }, AgentRunController(), AgentTraceFormatter(), {}, systemCount = 1)
+
+        val failure = assertThrows(AgentModelFailure::class.java) { loop.run() }
+
+        assertEquals("CONTEXT_SUMMARY_UNKNOWN_FUTURE_FAILURE", failure.code)
+        assertEquals(0, chats)
+        assertEquals(original, messages.toString())
+    }
+
+    @Test fun byteOnlyFallbackSendsOnceWithoutReplayingCompletedToolRound() {
+        val messages = JSONArray()
+            .put(JSONObject().put("role", "system").put("content", "fixed"))
+            .put(toolCall("done-1"))
+            .put(JSONObject().put("role", "tool").put("tool_call_id", "done-1").put("content", "previous result"))
+            .put(JSONObject().put("role", "user").put("content", "KEEP_LATEST_REQUEST"))
+            .put(JSONObject().put("role", "assistant").put("content", "x".repeat(20_000)))
+            .put(JSONObject().put("role", "user").put("content", "continue"))
+        val original = JSONArray(messages.toString())
+        var chats = 0
+        val loop = AgentLoop(config.copy(requestByteBudget = 16_000), messages, JSONArray(), provider { request ->
+            if (request.purpose == ProviderRequestPurpose.COMPACTION) {
+                throw AgentModelFailure("CONTEXT_SUMMARY_TIMEOUT", false, "fixture summary timeout")
+            }
+            chats++
+            response("complete")
+        }, { error("completed tool history must not be replayed") }, AgentRunController(), AgentTraceFormatter(), {}, systemCount = 1)
+
+        assertEquals("complete", loop.run().content)
+        assertEquals(1, chats)
+        assertEquals(original.length() + 1, messages.length())
+        for (index in 0 until original.length()) {
+            assertEquals(original.get(index).toString(), messages.get(index).toString())
+        }
+        assertNull(loop.contextSnapshot())
+    }
+
+    @Test fun byteOnlyFallbackDoesNotMaskTheFollowingChatFailure() {
+        val messages = messages(20_000)
+        val original = messages.toString()
+        var chats = 0
+        val loop = AgentLoop(config.copy(requestByteBudget = 16_000), messages, JSONArray(), provider { request ->
+            if (request.purpose == ProviderRequestPurpose.COMPACTION) {
+                throw AgentModelFailure("CONTEXT_SUMMARY_TIMEOUT", false, "fixture summary timeout")
+            }
+            chats++
+            throw AgentModelFailure("HTTP_400", false, "fixture chat rejected")
+        }, { error("No local tool replay") }, AgentRunController(), AgentTraceFormatter(), {}, systemCount = 1)
+
+        val failure = assertThrows(AgentModelFailure::class.java) { loop.run() }
+
+        assertEquals("HTTP_400", failure.code)
+        assertEquals(1, chats)
+        assertEquals(original, messages.toString())
+    }
+
     private fun messages(length: Int) = JSONArray().put(JSONObject().put("role", "system").put("content", "fixed"))
         .put(JSONObject().put("role", "assistant").put("content", "x".repeat(length)))
         .put(JSONObject().put("role", "user").put("content", "KEEP_LATEST_REQUEST"))

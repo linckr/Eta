@@ -64,13 +64,16 @@ internal class AgentContextSession(
         } catch (failure: AgentModelFailure) {
             // An estimate is not evidence of overflow. An unavailable/unhelpful summary
             // leaves the exact original request intact for the provider to decide.
-            if (failure.code in SOFT_COMPACTION_FAILURES) return false
+            if (failure.code in SOFT_COMPACTION_FAILURES) {
+                logSoftFallback("send_original", reason, failure, requestBytes, byteBudget)
+                return false
+            }
             // Byte-only pressure is a local upload preference, not evidence of provider
-            // capacity overflow: a failed summary must not abort the user's request.
-            // Cancellation escapes as AgentRunCancelledException, and checkpoint/storage
-            // failures stay fatal, so this fallback only covers summary and transport errors.
-            if (reason == "bytes" && failure.code !in BYTE_FALLBACK_HARD_FAILURE_CODES) {
-                logByteFallback(failure, requestBytes, byteBudget)
+            // capacity overflow: a known summary/transport failure must not abort the user's
+            // request. Cancellation escapes as AgentRunCancelledException, and unknown or
+            // storage-related failures still propagate, so new failure codes fail closed.
+            if (reason == "bytes" && byteFallbackEligible(failure)) {
+                logSoftFallback("send_original_after_summary_failure", reason, failure, requestBytes, byteBudget)
                 return false
             }
             throw failure
@@ -103,9 +106,10 @@ internal class AgentContextSession(
             "request_bytes=${requestBytes ?: "unknown"} byte_budget=$byteBudget reason=$reason") }
     }
 
-    private fun logByteFallback(failure: AgentModelFailure, requestBytes: Long?, byteBudget: Int) {
+    private fun logSoftFallback(action: String, trigger: String, failure: AgentModelFailure, requestBytes: Long?, byteBudget: Int) {
         runCatching { AndroidAgentLogger.warn("context_request_budget_fallback purpose=${requestPurpose.name.lowercase()} " +
-            "code=${failure.code} request_bytes=${requestBytes ?: "unknown"} byte_budget=$byteBudget action=send_original") }
+            "trigger=$trigger action=$action code=${failure.code} " +
+            "request_bytes=${requestBytes ?: "unknown"} byte_budget=$byteBudget") }
     }
 
     fun userAppended() {
@@ -224,10 +228,32 @@ internal class AgentContextSession(
         /** Expected no-ops after an estimate: keep the original request without a failure. */
         val SOFT_COMPACTION_FAILURES = setOf("CONTEXT_NOT_COMPACTABLE", "CONTEXT_NO_REDUCTION")
 
-        /** Storage integrity is not covered by the byte-only fallback; surface it instead of hiding it. */
-        val BYTE_FALLBACK_HARD_FAILURE_CODES = setOf(
-            "CONTEXT_SUMMARY_CHECKPOINT_FAILED",
-            "CONTEXT_SUMMARY_CHECKPOINT_INVALID",
+        /**
+         * Positive classification for the byte-only fallback: only failures that prove the summary
+         * attempt itself failed (or could not be attempted) are safe to soften. Anything not listed
+         * here — including a future failure code — propagates, so new errors fail closed.
+         */
+        val BYTE_FALLBACK_ELIGIBLE_CODES = setOf(
+            "ANTHROPIC_THINKING_CONTEXT_LOCKED",
+            "CONTEXT_SUMMARY_INPUT_BUDGET",
+            "CONTEXT_SUMMARY_TIMEOUT",
+            "CONTEXT_SUMMARY_TRANSPORT_FAILED",
+            "CONTEXT_SUMMARY_INVALID",
+            "CONTEXT_SUMMARY_TIME_BUDGET",
+            "CONTEXT_SUMMARY_BUDGET",
+            "CONTEXT_SUMMARY_MERGE_FAILED",
+            "CONTEXT_SUMMARY_FAILED",
+            "CONTEXT_OVERFLOW",
+            "MODEL_TIMEOUT",
+            "MODEL_CONNECTION_FAILED",
+            "MODEL_TLS_FAILED",
+            "MODEL_PROTOCOL_FAILED",
+            "STREAM_INCOMPLETE",
         )
+
+        fun byteFallbackEligible(failure: AgentModelFailure): Boolean =
+            failure.code in BYTE_FALLBACK_ELIGIBLE_CODES ||
+                failure.code.startsWith("HTTP_") ||
+                failure.code.startsWith("GATEWAY_")
     }
 }
