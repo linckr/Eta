@@ -25,6 +25,106 @@ import org.junit.Test
 
 class OpenAiResponsesProviderTest {
     @Test
+    fun rawDsmlMessageIsNotInventedByParserAndNativeItemCountsStayZero() {
+        val leaked = "<|DSML|tool_calls>\n<|DSML|invoke name=\"probe\">{}\n</|DSML|invoke>\n</|DSML|tool_calls>"
+        val body = responseTextEvent("response.output_text.delta", "message", 0, "delta", leaked) +
+            event("response.completed", JSONObject().put("response", JSONObject().put("status", "completed")
+                .put("output", JSONArray().put(messageItem("message", leaked)))))
+        withSseServer(body) { baseUrl ->
+            val response = OpenAiResponsesProvider.complete(ProviderRequest(config(baseUrl), JSONArray(), JSONArray()), AgentRunController())
+            assertEquals(leaked, response.assistantMessage.getString("content"))
+            assertTrue(AgentConversationCodec.parseToolCalls(response.assistantMessage).isEmpty())
+            val rejected = org.junit.Assert.assertThrows(AgentModelFailure::class.java) { AgentToolProtocolGuard.validate(response) }
+            val failed = response.httpTrace!!.failure(rejected) as AgentModelFailure
+            val diagnostic = JSONObject(failed.diagnostic()!!)
+            assertEquals(0, diagnostic.getInt("responses_stream_function_items"))
+            assertEquals(0, diagnostic.getInt("responses_terminal_function_items"))
+            assertEquals(1, diagnostic.getInt("responses_terminal_message_items"))
+        }
+    }
+
+    @Test
+    fun remappedTerminalIdsDoNotDuplicateIdenticalTextAndReasoning() {
+        val reasoning = JSONObject().put("type", "reasoning").put("id", "final_reason")
+            .put("content", JSONArray().put(JSONObject().put("type", "reasoning_text").put("text", "analysis")))
+        val body = responseTextEvent("response.reasoning_text.delta", "stream_reason", 0, "delta", "analysis") +
+            responseTextEvent("response.reasoning_text.done", "stream_reason", 0, "text", "analysis") +
+            responseTextEvent("response.output_text.delta", "stream_message", 1, "delta", "OK") +
+            responseTextEvent("response.output_text.done", "stream_message", 1, "text", "OK") +
+            event("response.completed", JSONObject().put("response", JSONObject().put("status", "completed")
+                .put("output", JSONArray().put(reasoning).put(messageItem("final_message", "OK")))))
+        withSseServer(body) { baseUrl ->
+            val events = mutableListOf<ProviderEvent>()
+            val response = OpenAiResponsesProvider.complete(ProviderRequest(config(baseUrl), JSONArray(), JSONArray()), AgentRunController(), events::add)
+            assertEquals("OK", response.assistantMessage.getString("content"))
+            assertEquals("analysis", response.assistantMessage.getString("reasoning_content"))
+            assertEquals(2, events.filterIsInstance<ProviderEvent.BlockStart>().size)
+            assertEquals(2, events.filterIsInstance<ProviderEvent.BlockEnd>().size)
+            assertEquals(listOf("analysis", "OK"), events.filterIsInstance<ProviderEvent.BlockDelta>().map { it.delta })
+            assertEquals("final_reason", ResponsesEphemeralState.outputItems(response.assistantMessage)!!.getJSONObject(0).getString("id"))
+        }
+    }
+
+    @Test
+    fun repeatedTextAtDifferentOutputIndexIsNotDeduplicated() {
+        val body = responseTextEvent("response.output_text.delta", "stream_message", 0, "delta", "OK") +
+            responseTextEvent("response.output_text.done", "stream_message", 0, "text", "OK") +
+            event("response.completed", JSONObject().put("response", JSONObject().put("status", "completed")
+                .put("output", JSONArray().put(messageItem("stream_message", "OK")).put(messageItem("second_message", "OK")))))
+        withSseServer(body) { baseUrl ->
+            val events = mutableListOf<ProviderEvent>()
+            OpenAiResponsesProvider.complete(ProviderRequest(config(baseUrl), JSONArray(), JSONArray()), AgentRunController(), events::add)
+            assertEquals(2, events.filterIsInstance<ProviderEvent.BlockStart>().size)
+        }
+    }
+
+    @Test
+    fun codexRequestSendsSelectedModelId() {
+        val body = event(
+            "response.completed",
+            JSONObject().put("response", JSONObject()
+                .put("status", "completed")
+                .put("model", "gpt-5.6-sol")
+                .put("output", JSONArray().put(messageItem("msg_1", "收到")))),
+        )
+        val requestBody = AtomicReference<String>()
+
+        withSseServer(body, onRequest = requestBody::set) { baseUrl ->
+            val result = OpenAiResponsesProvider.complete(
+                ProviderRequest(
+                    config(baseUrl).copy(
+                        authMode = CodexCompatibilityProfile.AUTH_MODE,
+                        model = "gpt-6-sol",
+                    ),
+                    JSONArray().put(JSONObject().put("role", "user").put("content", "收到")),
+                    JSONArray(),
+                ),
+                AgentRunController(),
+            )
+
+            assertEquals("gpt-6-sol", JSONObject(requestBody.get()).getString("model"))
+            assertEquals("收到", result.assistantMessage.getString("content"))
+        }
+    }
+
+    @Test
+    fun hostedSearchDeclarationExcludesSameNamedFunctionAndPreservesOtherTools() {
+        val functions = JSONArray().also { AgentWebToolCatalog.appendTo(it) }
+        for (enabled in listOf(false, true)) {
+            val request = OpenAiResponsesProvider.buildRequestJson(
+                config("https://example.com/v1").copy(hostedWebSearchEnabled = enabled),
+                JSONArray(), functions,
+            )
+            val tools = request.getJSONArray("tools")
+            val all = (0 until tools.length()).map { tools.getJSONObject(it) }
+            assertEquals(if (enabled) 1 else 0, all.count { it.optString("type") == "web_search" })
+            assertEquals(if (enabled) 0 else 1, all.count { it.optString("type") == "function" && it.optString("name") == "web_search" })
+            assertEquals(1, all.count { it.optString("name") == "fetch_url" })
+        }
+        assertEquals("原始目录不得被 Provider 投影修改", 2, functions.length())
+    }
+
+    @Test
     fun nativeReasoningDeltasArriveBeforeDoneAndTypedFinalContentIsNotDuplicated() {
         val firstDeltaDelivered = CountDownLatch(1)
         val completed = CountDownLatch(1)

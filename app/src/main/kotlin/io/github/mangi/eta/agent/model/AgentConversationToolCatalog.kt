@@ -13,6 +13,8 @@ internal object AgentConversationToolCatalog {
             "续读固定同一份历史，从零开始可刷新；不要把分页内容误认为完整历史。敏感工具原文和瞬时图片不在持久历史中。",
         parameters = JSONObject().put("type", "object").put("properties", JSONObject()
             .put("query", JSONObject().put("type", "string").put("maxLength", 500))
+            .put("source_ref", JSONObject().put("type", "string").put("maxLength", 100)
+                .put("description", "摘要来源中的 journal#消息ID；只查当前会话，无法解析时用query搜索。"))
             .put("message_index", JSONObject().put("type", "integer").put("minimum", 0))
             .put("offset", JSONObject().put("type", "integer").put("minimum", 0))
             .put("max_chars", JSONObject().put("type", "integer").put("minimum", 256).put("maximum", 8000))),

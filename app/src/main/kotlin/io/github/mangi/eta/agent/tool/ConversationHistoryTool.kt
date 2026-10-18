@@ -22,6 +22,14 @@ internal class ConversationHistoryTool(
         // 续读固定同一份历史，不能追着本工具新产生的日志无限读取。
         if (readSnapshot == null || (index == 0 && offset == 0)) readSnapshot = loader()
         val history = checkNotNull(readSnapshot)
+        val sourceRef = args.optString("source_ref")
+        if (sourceRef.isNotBlank()) {
+            require(sourceRef.startsWith("journal#") && sourceRef.length <= 100)
+            val match = history.indexOfFirst { it.messageId == sourceRef.removePrefix("journal#") }
+            if (match < 0) return AgentModelClient.ToolResult(JSONObject().put("ok", false)
+                .put("code", "HISTORY_SOURCE_NOT_FOUND").put("message", "当前会话找不到此来源；可用query检索。原始历史未修改。").toString())
+            if (!args.has("message_index")) index = match
+        }
         require(index <= history.size)
         val entries = JSONArray()
         while (index < history.size && remaining > 0 && entries.length() < 20) {
@@ -37,6 +45,7 @@ internal class ConversationHistoryTool(
             if (end < text.length && end > offset && text[end - 1].isHighSurrogate()) end--
             if (end == offset && offset < text.length) break
             entries.put(JSONObject().put("message_index", index).put("offset", offset)
+                .put("source_ref", message.messageId.takeIf { it.isNotBlank() }?.let { "journal#$it" }.orEmpty())
                 .put("text", text.substring(offset, end)).put("complete", end == text.length))
             remaining -= end - offset
             if (end < text.length) {

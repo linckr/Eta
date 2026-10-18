@@ -8,6 +8,8 @@ import io.github.mangi.eta.data.db.ConversationStateEntity
 import io.github.mangi.eta.data.db.EtaDatabase
 import io.github.mangi.eta.data.model.ModelSource
 import io.github.mangi.eta.data.model.withApiKey
+import io.github.mangi.eta.data.provider.BuiltinProviders
+import io.github.mangi.eta.data.provider.OfficialModelCatalog
 import io.github.mangi.eta.agent.roleplay.CharacterCardCodec
 import io.github.mangi.eta.agent.roleplay.RoleplayBinding
 import io.github.mangi.eta.agent.roleplay.RoleplayMessageLink
@@ -16,6 +18,8 @@ import io.github.mangi.eta.agent.roleplay.RoleplayReplyRevision
 import io.github.mangi.eta.agent.roleplay.UserPersona
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonObject
 import java.util.Base64
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
@@ -39,9 +43,118 @@ class EtaBackupRepositoryTest {
         EtaDatabase.closeForTests()
         context.deleteDatabase("eta.db")
         SettingsDataStore.init(context)
-        runBlocking { SettingsDataStore.setSelection(null, null) }
+        runBlocking {
+            SettingsDataStore.setSelection(null, null)
+            SettingsDataStore.setCompactionModelId(null)
+            SettingsDataStore.setOfficialModelCatalogRevision(0)
+        }
         ProviderRepository.init(context)
         AgentMemoryRepository.init(context)
+    }
+
+    @Test
+    fun compactionSelectionSurvivesBackupAndLegacyBackupRestoresFollowCurrent() = runBlocking {
+        val model = io.github.mangi.eta.data.model.Model(
+            "summary-model", "summary-api", "Summary", contextWindowOverride = 64_000)
+        val provider = io.github.mangi.eta.data.model.CustomProviderSetting(
+            "summary-provider", "Summary", "https://example.invalid", apiKey = "fixture", models = listOf(model))
+        ProviderRepository.addProvider(provider)
+        SettingsDataStore.setSelection(provider.id, model.id)
+        SettingsDataStore.setCompactionModelId(model.id)
+        val conversation = ConversationEntity("summary-backup", "Fixture", false, createdAt = 1L, updatedAt = 2L)
+        val message = ConversationMessageEntity("summary-message", conversation.id, 0, "user", "fixture")
+        EtaDatabase.get(context).conversationDao().replaceAll(listOf(conversation), listOf(message), emptyList(),
+            ConversationStateEntity(selectedConversationId = conversation.id))
+        val output = ByteArrayOutputStream()
+        EtaBackupRepository.export(context, output)
+        val bytes = output.toByteArray()
+
+        SettingsDataStore.setCompactionModelId("changed")
+        EtaBackupRepository.import(context, ByteArrayInputStream(bytes))
+        assertEquals(model.id, SettingsDataStore.settings().compactionModelId)
+        assertEquals(provider.id, SettingsDataStore.settings().selectedProviderId)
+        assertEquals(model.id, SettingsDataStore.settings().selectedModelId)
+        assertEquals("fixture", ProviderRepository.providerById(provider.id)!!.apiKey)
+        assertEquals(64_000, ProviderRepository.providerById(provider.id)!!.models.single().contextWindowOverride)
+        assertEquals(listOf(message), EtaDatabase.get(context).conversationDao().messages())
+
+        val legacy = JsonObject(Json.parseToJsonElement(bytes.toString(Charsets.UTF_8)).jsonObject - "compactionModelId")
+        EtaBackupRepository.import(context, ByteArrayInputStream(legacy.toString().toByteArray()))
+        assertEquals(null, SettingsDataStore.settings().compactionModelId)
+        assertEquals(model.id, SettingsDataStore.settings().selectedModelId)
+        assertEquals(listOf(message), EtaDatabase.get(context).conversationDao().messages())
+
+        val followOutput = ByteArrayOutputStream()
+        EtaBackupRepository.export(context, followOutput)
+        SettingsDataStore.setCompactionModelId(model.id)
+        EtaBackupRepository.import(context, ByteArrayInputStream(followOutput.toByteArray()))
+        assertEquals(null, SettingsDataStore.settings().compactionModelId)
+    }
+
+    @Test
+    fun requestByteBudgetSurvivesBackup() = runBlocking {
+        val providers = listOf<io.github.mangi.eta.data.model.ProviderSetting>(
+            io.github.mangi.eta.data.model.OpenAiCompatibleProviderSetting("budget-default", "Default", "https://example.invalid", apiKey = "fixture", requestByteBudget = null),
+            io.github.mangi.eta.data.model.AnthropicProviderSetting("budget-off", "Disabled", "https://example.invalid", apiKey = "fixture", requestByteBudget = 0),
+            io.github.mangi.eta.data.model.CustomProviderSetting("budget-custom", "Custom", "https://example.invalid", apiKey = "fixture", requestByteBudget = 262657),
+        )
+        providers.forEach { ProviderRepository.addProvider(it) }
+        val output = ByteArrayOutputStream()
+        EtaBackupRepository.export(context, output)
+        val dao = EtaDatabase.get(context).providerDao()
+        for (provider in providers) {
+            val row = dao.providerById(provider.id)!!.provider
+            dao.updateProvider(row.copy(requestByteBudget = 1))
+        }
+        EtaBackupRepository.import(context, ByteArrayInputStream(output.toByteArray()))
+        for (provider in providers) {
+            val restored = ProviderRepository.providerById(provider.id)!!
+            assertEquals(provider.requestByteBudget, restored.requestByteBudget)
+            assertEquals(provider.apiKey, restored.apiKey)
+        }
+    }
+
+    @Test
+    fun capacityMetadataAndManualOverridesSurviveExportImport() = runBlocking {
+        val models = listOf(
+            io.github.mangi.eta.data.model.Model("capacity-total", "total", "Total",
+                contextWindow = 128_000, contextWindowKind = "total", inputTokenLimit = 96_000, contextWindowOverride = 64_000),
+            io.github.mangi.eta.data.model.Model("capacity-input", "input", "Input",
+                contextWindow = 96_000, contextWindowKind = "input", inputTokenLimit = 96_000),
+            io.github.mangi.eta.data.model.Model("capacity-legacy", "legacy", "Legacy",
+                contextWindow = 128_000, contextWindowOverride = 256_000),
+        )
+        val provider = io.github.mangi.eta.data.model.CustomProviderSetting(
+            id = "capacity-provider", name = "Capacity", baseUrl = "https://example.invalid", models = models)
+        ProviderRepository.addProvider(provider)
+        val output = ByteArrayOutputStream()
+        EtaBackupRepository.export(context, output)
+        ProviderRepository.replaceModels(provider.id, emptyList())
+        EtaBackupRepository.import(context, ByteArrayInputStream(output.toByteArray()))
+        val restored = ProviderRepository.providerById(provider.id)!!.models.associateBy { it.id }
+        assertEquals(models.associateBy { it.id }, restored)
+        assertEquals("unknown", restored.getValue("capacity-total").effectiveContextWindowKind)
+        assertEquals("input", restored.getValue("capacity-input").effectiveContextWindowKind)
+    }
+
+    @Test
+    fun noticeDiagnosticAndLegacyArraySurviveBackupExportImport() = runBlocking {
+        val safe = io.github.mangi.eta.agent.runtime.ModelFailureDiagnostic.sanitize(
+            """{"code":"MODEL_TLS_FAILED","phase":"connect","trace_id":"12345678-1234-1234-1234-123456789abc"}""")!!
+        val conversation = ConversationEntity("diagnostic-backup", "诊断", false, createdAt = 1L, updatedAt = 2L)
+        val notices = listOf(safe, "[]").mapIndexed { index, metadata ->
+            ConversationMessageEntity("notice-$index", conversation.id, index, "system_notice", "runtime_failed",
+                resultSummary = "连接失败", toolsJson = metadata)
+        }
+        EtaDatabase.get(context).conversationDao().replaceAll(listOf(conversation), notices, emptyList(),
+            ConversationStateEntity(selectedConversationId = conversation.id))
+        val output = ByteArrayOutputStream()
+        EtaBackupRepository.export(context, output)
+        EtaDatabase.get(context).conversationDao().replaceAll(emptyList(), emptyList(), emptyList(), null)
+        EtaBackupRepository.import(context, ByteArrayInputStream(output.toByteArray()))
+        val restored = EtaDatabase.get(context).conversationDao().messages()
+        assertEquals(listOf(safe, "[]"), restored.sortedBy { it.sortIndex }.map { it.toolsJson })
+        assertEquals(2, restored.size)
     }
 
     @Test
@@ -113,7 +226,7 @@ class EtaBackupRepositoryTest {
 
     @Test(expected = EtaBackupException::class)
     fun rejectsUnknownBackupFormatBeforeChangingData(): Unit = runBlocking {
-        EtaBackupRepository.inspect(
+        EtaBackupRepository.inspect(context,
             ByteArrayInputStream("{\"format\":\"other\",\"schemaVersion\":1,\"exportedAt\":0}".toByteArray())
         )
     }
@@ -157,10 +270,47 @@ class EtaBackupRepositoryTest {
 
     @Test
     fun versionOneBackupRemainsReadable() = runBlocking {
-        val summary = EtaBackupRepository.inspect(ByteArrayInputStream(
+        val summary = EtaBackupRepository.inspect(context, ByteArrayInputStream(
             """{"format":"eta-backup","schemaVersion":1,"exportedAt":0}""".toByteArray(),
         ))
         assertEquals(0, summary.characterCount)
+    }
+
+    @Test
+    fun oldBackupReceivesOnlyModelsAddedAfterItsCatalogRevision() = runBlocking {
+        ProviderRepository.ensureBuiltInsMerged()
+        val providers = EtaDatabase.get(context).providerDao().providers().map { row ->
+            val models = if (row.provider.id == BuiltinProviders.OPENAI_ID) {
+                row.models.filterNot { it.modelId.startsWith("gpt-6-") || it.modelId == "gpt-5.6-terra" }
+            } else {
+                row.models
+            }
+            EtaBackupProvider(row.provider, models)
+        }
+        val oldBackup = EtaBackupDocument(exportedAt = 0, providers = providers)
+        EtaBackupRepository.import(context, ByteArrayInputStream(Json.encodeToString(oldBackup).toByteArray()))
+
+        val restored = ProviderRepository.providerById(BuiltinProviders.OPENAI_ID)!!.models
+        assertTrue(restored.any { it.modelId == "gpt-6-astra" })
+        assertTrue(restored.none { it.modelId == "gpt-5.6-terra" })
+        assertEquals(OfficialModelCatalog.CURRENT_REVISION, SettingsDataStore.officialModelCatalogRevision())
+    }
+
+    @Test
+    fun currentBackupKeepsDeletionOfNewCatalogModel() = runBlocking {
+        ProviderRepository.ensureBuiltInsMerged()
+        val provider = ProviderRepository.providerById(BuiltinProviders.OPENAI_ID)!!
+        val removed = provider.models.first { it.modelId == "gpt-6-sol" }
+        ModelRepository.deleteModel(provider.id, removed.id)
+        val output = ByteArrayOutputStream()
+        EtaBackupRepository.export(context, output)
+        val document = Json.decodeFromString<EtaBackupDocument>(output.toString(Charsets.UTF_8.name()))
+        assertEquals(OfficialModelCatalog.CURRENT_REVISION, document.catalogRevision)
+
+        EtaBackupRepository.import(context, ByteArrayInputStream(output.toByteArray()))
+
+        assertTrue(ProviderRepository.providerById(provider.id)!!.models.none { it.modelId == removed.modelId })
+        assertEquals(OfficialModelCatalog.CURRENT_REVISION, SettingsDataStore.officialModelCatalogRevision())
     }
 
     @Test

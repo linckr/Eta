@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material.icons.rounded.VisibilityOff
@@ -38,11 +39,16 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import io.github.mangi.eta.EtaApp
+import io.github.mangi.eta.CodexOAuthManager
 import io.github.mangi.eta.R
+import io.github.mangi.eta.CodexDeviceCode
 import io.github.mangi.eta.data.model.AnthropicProviderSetting
 import io.github.mangi.eta.data.model.CustomProviderSetting
 import io.github.mangi.eta.data.model.OpenAiEndpointMode
 import io.github.mangi.eta.data.model.ProviderSetting
+import io.github.mangi.eta.data.model.ProviderSourceTypes
+import io.github.mangi.eta.data.provider.ProviderSourceRegistry
+import io.github.mangi.eta.data.repository.CodexUiError
 import io.github.mangi.eta.data.model.withId
 import io.github.mangi.eta.data.repository.ProviderRepository
 import io.github.mangi.eta.data.repository.RemoteModelFetcher
@@ -50,6 +56,7 @@ import io.github.mangi.eta.data.repository.RuntimeConfigRepository
 import io.github.mangi.eta.ui.components.EtaCard
 import io.github.mangi.eta.ui.components.EtaOverlayDialog
 import io.github.mangi.eta.ui.components.EtaPreference
+import io.github.mangi.eta.ui.components.EtaPreferenceDefaults
 import io.github.mangi.eta.ui.components.EtaPreferenceDivider
 import io.github.mangi.eta.ui.components.EtaSwitchPreference
 import io.github.mangi.eta.ui.components.EtaTextButton
@@ -64,7 +71,10 @@ import io.github.mangi.eta.ui.layout.horizontalCutoutPadding
 import io.github.mangi.eta.ui.navigation.NewProviderType
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.DropdownItem
 import top.yukonga.miuix.kmp.basic.Icon
@@ -156,7 +166,7 @@ internal fun ModelProviderDetailScreen(
                     selectedTabIndex = currentTab,
                     onTabSelected = { currentTab = it },
                     modifier = Modifier.padding(
-                        horizontal = sidePadding + 12.dp,
+                        horizontal = sidePadding + EtaPreferenceDefaults.SidePadding,
                         vertical = 8.dp,
                     ),
                 )
@@ -201,6 +211,7 @@ private fun ProviderConfigTab(
     onDeleted: () -> Unit,
 ) {
     val context = LocalContext.current
+    val isCodexProvider = ProviderSourceRegistry.resolve(provider) == ProviderSourceTypes.OPENAI_CODEX
     var headersExpanded by rememberSaveable { mutableStateOf(false) }
     var apiKeyVisible by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf<String?>(null) }
@@ -209,6 +220,47 @@ private fun ProviderConfigTab(
     var showResetDialog by remember { mutableStateOf(false) }
     var isWorking by remember { mutableStateOf(false) }
     var creationCommitted by remember { mutableStateOf(false) }
+    var codexSignedIn by remember(provider.id) { mutableStateOf(false) }
+    var codexDeviceCode by remember(provider.id) { mutableStateOf<CodexDeviceCode?>(null) }
+    var codexLoginJob by remember(provider.id) { mutableStateOf<Job?>(null) }
+    var codexStatusIsError by remember(provider.id) { mutableStateOf(false) }
+
+    LaunchedEffect(provider.id, isCodexProvider) {
+        if (isCodexProvider) {
+            codexSignedIn = withContext(Dispatchers.IO) { CodexOAuthManager.hasStoredCredentials() }
+        }
+    }
+
+    fun startCodexSignIn() {
+        if (isWorking || codexLoginJob?.isActive == true) return
+        codexLoginJob = scope.launch {
+            isWorking = true
+            status = null
+            codexStatusIsError = false
+            codexDeviceCode = null
+            try {
+                val code = CodexOAuthManager.requestDeviceCode()
+                codexDeviceCode = code
+                withContext(Dispatchers.IO) {
+                    CodexOAuthManager.completeDeviceCodeLogin(code)
+                }
+                codexSignedIn = true
+                codexDeviceCode = null
+                RuntimeConfigRepository.syncToRemotePreferences(EtaApp.serviceInstance)
+                status = context.getString(R.string.provider_codex_account_signed_in)
+                codexStatusIsError = false
+            } catch (cancelled: CancellationException) {
+                codexDeviceCode = null
+                throw cancelled
+            } catch (failure: Throwable) {
+                status = CodexUiError.login(failure)
+                codexStatusIsError = true
+            } finally {
+                isWorking = false
+                codexLoginJob = null
+            }
+        }
+    }
 
     LazyColumn(
         modifier = Modifier
@@ -225,8 +277,130 @@ private fun ProviderConfigTab(
         overscrollEffect = null,
     ) {
         item(key = "connection") {
-            ProviderSection(title = stringResource(R.string.ui_connection_configuration_7d057b)) {
-                Column(modifier = Modifier.padding(16.dp)) {
+            ProviderSection(
+                title = if (isCodexProvider) {
+                    stringResource(R.string.provider_codex_account_title)
+                } else {
+                    stringResource(R.string.ui_connection_configuration_7d057b)
+                },
+            ) {
+                if (isCodexProvider) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        Text(
+                            text = if (codexSignedIn) {
+                                stringResource(R.string.provider_codex_account_signed_in)
+                            } else {
+                                stringResource(R.string.provider_codex_account_signed_out)
+                            },
+                            style = MiuixTheme.textStyles.body2,
+                            color = if (codexSignedIn) StatusSuccess else MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        if (codexDeviceCode != null) {
+                            Text(
+                                text = stringResource(R.string.provider_codex_login_instructions),
+                                style = MiuixTheme.textStyles.footnote2,
+                                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                                modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
+                            )
+                            SelectionContainer {
+                                Text(
+                                    text = stringResource(
+                                        R.string.provider_codex_device_code,
+                                        codexDeviceCode!!.userCode,
+                                    ),
+                                    style = MiuixTheme.textStyles.headline1,
+                                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                                )
+                            }
+                            EtaTextButton(
+                                text = stringResource(R.string.provider_codex_open_verification),
+                                modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                                onClick = {
+                                    val verificationUrl = codexDeviceCode?.verificationUrl ?: return@EtaTextButton
+                                    runCatching {
+                                        context.startActivity(
+                                            android.content.Intent(
+                                                android.content.Intent.ACTION_VIEW,
+                                                android.net.Uri.parse(verificationUrl),
+                                            ),
+                                        )
+                                    }.onFailure { failure -> status = CodexUiError.login(failure) }
+                                },
+                            )
+                        }
+                        if (isWorking) {
+                            Text(
+                                text = stringResource(R.string.provider_codex_waiting_authorization),
+                                style = MiuixTheme.textStyles.footnote2,
+                                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                                modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                            )
+                        }
+                        if (!isWorking) {
+                            EtaTextButton(
+                                text = if (codexSignedIn) {
+                                    stringResource(R.string.provider_codex_relogin)
+                                } else {
+                                    stringResource(R.string.provider_codex_login)
+                                },
+                                modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
+                                colors = ButtonDefaults.textButtonColorsPrimary(),
+                                onClick = { startCodexSignIn() },
+                            )
+                        } else {
+                            EtaTextButton(
+                                text = stringResource(R.string.provider_codex_cancel_login),
+                                enabled = true,
+                                modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
+                                onClick = { codexLoginJob?.cancel() },
+                            )
+                        }
+                        if (codexSignedIn && !isWorking) {
+                            EtaTextButton(
+                                text = stringResource(R.string.provider_codex_logout),
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = ButtonDefaults.textButtonColorsPrimary(
+                                    color = MiuixTheme.colorScheme.error,
+                                    textColor = MiuixTheme.colorScheme.onError,
+                                ),
+                                onClick = {
+                                    scope.launch {
+                                        isWorking = true
+                                        try {
+                                            withContext(Dispatchers.IO) { CodexOAuthManager.logout() }
+                                            codexSignedIn = false
+                                            status = context.getString(R.string.provider_codex_account_signed_out)
+                                            codexStatusIsError = false
+                                            RuntimeConfigRepository.syncToRemotePreferences(EtaApp.serviceInstance)
+                                        } catch (cancelled: CancellationException) {
+                                            throw cancelled
+                                        } catch (failure: Throwable) {
+                                            status = CodexUiError.login(failure)
+                                            codexStatusIsError = true
+                                        } finally {
+                                            isWorking = false
+                                        }
+                                    }
+                                },
+                            )
+                        }
+                        status?.let { message ->
+                            Text(
+                                text = message,
+                                style = MiuixTheme.textStyles.footnote2,
+                                color = if (codexStatusIsError) StatusError else StatusSuccess,
+                                modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                            )
+                        }
+                    }
+                } else {
+                    Column(modifier = Modifier.padding(16.dp)) {
                     TextField(
                         value = draft.name,
                         onValueChange = { onDraftChange(draft.copy(name = it)) },
@@ -336,6 +510,7 @@ private fun ProviderConfigTab(
                                         hostedWebSearchEnabled = draft.hostedWebSearchEnabled,
                                         anthropicVersion = draft.anthropicVersion,
                                         customHeaders = draft.headers.map { it.header },
+                                        requestByteBudget = requestByteBudgetFromKiB(draft.requestByteBudgetKiB),
                                     )
                                 )
                             } finally {
@@ -344,15 +519,52 @@ private fun ProviderConfigTab(
                         }
                     },
                 )
+                }
             }
         }
 
-        providerHeadersEditor(
-            headers = draft.headers,
-            expanded = headersExpanded,
-            onExpandedChange = { headersExpanded = it },
-            onHeadersChange = { onDraftChange(draft.copy(headers = it)) },
-        )
+        if (!isCodexProvider) {
+            providerHeadersEditor(
+                headers = draft.headers,
+                expanded = headersExpanded,
+                onExpandedChange = { headersExpanded = it },
+                onHeadersChange = { onDraftChange(draft.copy(headers = it)) },
+            )
+        }
+
+        item(key = "request_byte_budget") {
+            ProviderSection(title = stringResource(R.string.provider_request_byte_budget_title)) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    TextField(
+                        value = draft.requestByteBudgetKiB,
+                        onValueChange = { onDraftChange(draft.copy(requestByteBudgetKiB = it)) },
+                        label = "KiB",
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Text(
+                        text = stringResource(R.string.provider_request_byte_budget_hint),
+                        style = MiuixTheme.textStyles.footnote2,
+                        color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                    Text(
+                        text = stringResource(R.string.provider_request_byte_budget_summary),
+                        style = MiuixTheme.textStyles.footnote2,
+                        color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                    if (requestByteBudgetInputError(draft.requestByteBudgetKiB)) {
+                        Text(
+                            text = stringResource(R.string.provider_request_byte_budget_error),
+                            style = MiuixTheme.textStyles.footnote2,
+                            color = StatusError,
+                            modifier = Modifier.padding(top = 8.dp),
+                        )
+                    }
+                }
+            }
+        }
 
         item(key = "preferences_and_prompt") {
             ProviderSection(title = stringResource(R.string.ui_preferences_and_strategies_2abd3c)) {
@@ -387,7 +599,7 @@ private fun ProviderConfigTab(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 12.dp)
+                    .padding(horizontal = EtaPreferenceDefaults.SidePadding)
                     .padding(top = 12.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
@@ -420,6 +632,7 @@ private fun ProviderConfigTab(
                                 hostedWebSearchEnabled = draft.hostedWebSearchEnabled,
                                 anthropicVersion = draft.anthropicVersion,
                                 customHeaders = draft.headers.map { it.header },
+                                requestByteBudget = requestByteBudgetFromKiB(draft.requestByteBudgetKiB),
                             )
                             try {
                                 if (isNew) {
@@ -560,6 +773,8 @@ private fun ProviderConfigTab(
                 confirmText = if (isWorking) context.getString(R.string.page_resetting_616090) else context.getString(R.string.page_reset_3d8134),
                 cancelEnabled = !isWorking,
                 confirmEnabled = !isWorking,
+                // 重置会覆盖用户改过的连接与模型配置，与删除同属破坏性确认。
+                destructive = true,
                 onCancel = { showResetDialog = false },
                 onConfirm = {
                     scope.launch {

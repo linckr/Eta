@@ -1,6 +1,7 @@
 package io.github.mangi.eta.ui.app
 
 import io.github.mangi.eta.agent.runtime.AgentEvent
+import io.github.mangi.eta.agent.runtime.AgentTokenUsage
 import io.github.mangi.eta.ui.model.AgentChatMessageUi
 import io.github.mangi.eta.ui.model.AgentMessageUi
 import io.github.mangi.eta.ui.model.SystemNoticeCode
@@ -11,10 +12,179 @@ import io.github.mangi.eta.ui.model.ToolActivityStatusUi
 import io.github.mangi.eta.ui.model.UserMessageUi
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AgentRunMessageProjectorTest {
+    @Test
+    fun rejectedProtocolReplyIsMarkedWithoutDeletingRawTextOrPriorRounds() {
+        val projector = AgentRunMessageProjector()
+        val raw = "<|DSML|tool_calls>\n<|DSML|invoke name=\"probe\">{}\n</|DSML|invoke>\n</|DSML|tool_calls>"
+        val prior = AgentMessageUi("assistant-run-1-0", "verified")
+        val bad = AgentMessageUi("assistant-run-2-0", raw)
+        val output = projector.applyEvent("run", AgentEvent.ModelRetryScheduled(2, 1, 1, 2000, "MODEL_TOOL_PROTOCOL_LEAK"), listOf(prior, bad))
+        assertEquals(prior, output.first())
+        val marked = output[1] as AgentMessageUi
+        assertTrue(marked.protocolRejected)
+        assertEquals(raw, marked.content)
+        assertTrue(output.last() is SystemNoticeMessageUi)
+        val normal = projector.applyEvent("run", AgentEvent.ModelRetryScheduled(2, 1, 1, 2000, "MODEL_TIMEOUT"), listOf(bad))
+        assertFalse((normal.first() as AgentMessageUi).protocolRejected)
+    }
+
+    @Test
+    fun compactionProgressUpdatesSingleNoticeInPlaceAndRemainsRunningUntilCompleted() {
+        val projector = AgentRunMessageProjector()
+        val started = AgentEvent.ContextCompaction("operation", AgentEvent.ContextCompaction.PHASE_STARTED)
+        val initial = projector.applyEvent("run", started, emptyList())
+        val laterMessage = UserMessageUi("later", "继续")
+        val withLaterMessage = initial + laterMessage
+        val progress = started.copy(phase = AgentEvent.ContextCompaction.PHASE_PROGRESS,
+            completedSlices = 13, elapsedMs = 1_500_000L,
+            activity = io.github.mangi.eta.agent.runtime.ContextCompactionActivity("waiting", 14, 12_000))
+        val projected = projector.applyEvent("run", progress, withLaterMessage)
+        assertEquals(2, projected.size)
+        assertEquals(laterMessage, projected.last())
+        val notice = projected.first() as SystemNoticeMessageUi
+        assertTrue(notice.running)
+        assertTrue(notice.detail!!.contains("已完成 13 片"))
+        assertTrue(notice.detail.contains("25分0秒"))
+        assertTrue(notice.detail.contains("第 14 段"))
+        assertTrue(notice.detail.contains("等待模型响应"))
+        assertFalse(notice.detail.contains("失败"))
+        assertTrue(notice.compactionProgressJson!!.contains("13"))
+        assertSame(projected, projector.applyEvent("run", progress, projected))
+        val completed = projector.applyEvent("run", started.copy(phase = AgentEvent.ContextCompaction.PHASE_COMPLETED), projected)
+        val finished = completed.first() as SystemNoticeMessageUi
+        assertFalse(finished.running)
+        assertEquals(notice.id, finished.id)
+        assertEquals(notice.compactionProgressJson, finished.compactionProgressJson)
+        assertEquals(2, completed.size)
+        val stopped = projector.finishContextCompaction("run", projected, "上下文压缩已中断")
+        assertFalse((stopped.first() as SystemNoticeMessageUi).running)
+        assertEquals(notice.compactionProgressJson, (stopped.first() as SystemNoticeMessageUi).compactionProgressJson)
+    }
+
+    @Test
+    fun separateCompactionTracesDoNotOverwriteEachOtherAndSameTraceReplayIsIdempotent() {
+        val projector = AgentRunMessageProjector { 1000L }
+        fun event(trace: String) = AgentEvent.ModelRetryScheduled(1, 1, 1, 0, "MODEL_TIMEOUT",
+            org.json.JSONObject().put("code", "MODEL_TIMEOUT").put("purpose", "compaction")
+                .put("trace_id", trace).put("round", 1).put("attempt", 1).toString())
+        val first = event("12345678-1234-1234-1234-123456789abc")
+        val second = event("22345678-1234-1234-1234-123456789abc")
+        val one = projector.applyEvent("run", first, emptyList())
+        assertEquals(one, projector.applyEvent("run", first, one))
+        val both = projector.applyEvent("run", second, one)
+        assertEquals(2, both.filterIsInstance<SystemNoticeMessageUi>().size)
+        assertEquals(both, projector.applyEvent("run", second, both))
+        assertEquals("assistant-run-1", AgentRunMessageProjector.resultFallbackId("run", both))
+    }
+
+    @Test
+    fun compactionRetryIsIndependentOfChatAttemptAndKeepsChatBlockStreaming() {
+        val projector = AgentRunMessageProjector { 1000L }
+        val chat = projector.appendTextDelta("run", 1, 0, "partial chat", emptyList())
+        val diagnostic = """{"code":"MODEL_TIMEOUT","purpose":"compaction","round":1,"attempt":1}"""
+        val retry = AgentEvent.ModelRetryScheduled(1, 1, 1, 0, "MODEL_TIMEOUT", diagnostic)
+        val projected = projector.applyEvent("run", retry, chat)
+        assertTrue(projected.filterIsInstance<AgentMessageUi>().single().isStreaming)
+        val notice = projected.filterIsInstance<SystemNoticeMessageUi>().single()
+        assertEquals("assistant-run-compaction-retry-1-1", notice.id)
+        assertTrue(notice.detail!!.contains("上下文压缩"))
+        assertEquals(0, AgentRunMessageProjector.resultTargetIndex("run", projected))
+        assertEquals(0, AgentRunMessageProjector.resultTargetIndex("run", projected, includeNotices = true))
+        assertEquals("assistant-run-1", AgentRunMessageProjector.resultFallbackId("run", projected))
+        assertEquals(projected, projector.applyEvent("run", retry, projected))
+        val completed = AgentRunMessageProjector.applyResult("run", projected, "complete chat", null)
+        assertEquals("complete chat", completed.filterIsInstance<AgentMessageUi>().single().content)
+        assertEquals(notice, completed.filterIsInstance<SystemNoticeMessageUi>().single())
+    }
+
+    @Test
+    fun retryReplayKeepsOriginalTimestampWhileNewAttemptGetsCurrentTime() {
+        var now = 1000L
+        val projector = AgentRunMessageProjector(nowEpochMillis = { now }, nowElapsedRealtime = { 1000L })
+        val event = AgentEvent.ModelRetryScheduled(2, 1, 3, 2000, "MODEL_TIMEOUT")
+        val first = projector.scheduleModelRetry("run", event, emptyList())
+        now = 9000L
+        val replay = projector.scheduleModelRetry("run", event, first)
+        assertEquals(first, replay)
+        val diagnostic = org.json.JSONObject(replay.filterIsInstance<SystemNoticeMessageUi>().single().diagnosticJson!!)
+        assertEquals(1000L, diagnostic.getLong("occurred_at_ms"))
+        val next = projector.scheduleModelRetry("run", event.copy(attempt = 2), replay)
+        assertEquals(9000L, org.json.JSONObject(next.filterIsInstance<SystemNoticeMessageUi>().single().diagnosticJson!!).getLong("occurred_at_ms"))
+    }
+
+    @Test
+    fun failureNoticeKeepsPartialOutputAndResultDoesNotDuplicateDiagnostic() {
+        val projector = AgentRunMessageProjector { 1000L }
+        val partial = projector.appendTextDelta("run", 1, 0, "已输出", emptyList())
+        val raw = """{"code":"MODEL_TIMEOUT","phase":"response_body","message":"private"}"""
+        val projected = projector.applyEvent("run", AgentEvent.RunFailed("超时", raw), partial)
+        val result = AgentRunMessageProjector.applyResult("run", projected, "", SystemNoticeCode.RuntimeFailed, "超时")
+        assertEquals("已输出", result.filterIsInstance<AgentMessageUi>().single().content)
+        assertEquals(1, result.filterIsInstance<SystemNoticeMessageUi>().size)
+        assertFalse(result.filterIsInstance<SystemNoticeMessageUi>().single().diagnosticJson!!.contains("private"))
+    }
+
+    @Test
+    fun retryReasonsRemainDistinctAndCarryStructuredCode() {
+        val projector = AgentRunMessageProjector { 1000L }
+        val timeout = AgentEvent.ModelRetryScheduled(1, 1, 3, 2000, "MODEL_TIMEOUT")
+        val empty = AgentEvent.ModelRetryScheduled(1, 1, 1, 2000, "MODEL_EMPTY_RESPONSE")
+        assertTrue(timeout.displayMessage.contains("超时"))
+        assertTrue(empty.displayMessage.contains("空响应"))
+        val notice = projector.applyEvent("run", timeout, emptyList()).filterIsInstance<SystemNoticeMessageUi>().single()
+        assertEquals("MODEL_TIMEOUT", org.json.JSONObject(notice.diagnosticJson!!).getString("code"))
+    }
+
+    @Test
+    fun eventsWithoutVisibleChangeReturnSameListSoCallerSkipsTimestamp() {
+        val projector = AgentRunMessageProjector { 1_000L }
+        val messages = projector.appendTextDelta("run", 1, 0, "回答", emptyList())
+        listOf(
+            AgentEvent.RoundStarted(1, 2),
+            AgentEvent.ProviderRequestStarted(1),
+            AgentEvent.AssistantReceived(1, 2, "", emptyList()),
+            AgentEvent.UsageReceived(1, AgentTokenUsage(null, null, null, null, null)),
+            AgentEvent.UsageReceived(9, AgentTokenUsage(null, 10, 2, null, null)),
+            AgentEvent.UserSupplementReceived(0, "补充"),
+        ).forEach { event -> assertSame(event.toString(), messages, projector.applyEvent("run", event, messages)) }
+    }
+
+    @Test
+    fun usageAttachesToRoundWithoutRestartingStreaming() {
+        val projector = AgentRunMessageProjector { 1_000L }
+        val streaming = projector.appendTextDelta("run", 1, 0, "回答", emptyList())
+        val finished = projector.finalizeTextBlock("run", 1, 0, null, streaming)
+        val withUsage = projector.applyEvent("run", AgentEvent.UsageReceived(1, AgentTokenUsage(100, 80, 20, null, null)), finished)
+        val message = withUsage.filterIsInstance<AgentMessageUi>().single()
+        assertEquals(100, message.usage?.contextTokens)
+        assertFalse(message.isStreaming)
+    }
+
+    @Test
+    fun applyResultFillsSingleBlockKeepsMultiBlockAndReplacesWithNotice() {
+        val projector = AgentRunMessageProjector { 1_000L }
+        val single = projector.appendTextDelta("run", 1, 0, "流式半截", emptyList())
+        assertEquals("完整回答", AgentRunMessageProjector.applyResult("run", single, "完整回答", null)
+            .filterIsInstance<AgentMessageUi>().single().content)
+
+        val multi = projector.appendTextDelta("run", 1, 1, "第二段", projector.finalizeTextBlock("run", 1, 0, null, single))
+        assertEquals(listOf("流式半截", "第二段"), AgentRunMessageProjector.applyResult("run", multi, "合并全文", null)
+            .filterIsInstance<AgentMessageUi>().map { it.content })
+
+        val failed = AgentRunMessageProjector.applyResult("run", single, "", SystemNoticeCode.RuntimeFailed, "错误")
+        val notice = failed.single() as SystemNoticeMessageUi
+        assertEquals(single.single().id, notice.id)
+        assertEquals("错误", notice.detail)
+
+        val empty = AgentRunMessageProjector.applyResult("other", emptyList(), "回答", null)
+        assertEquals("assistant-other-1", empty.single().id)
+    }
+
     @Test
     fun retryKeepsFailedAttemptSeparateAndReplayClearsItsNotice() {
         val projector = AgentRunMessageProjector { 1_000L }

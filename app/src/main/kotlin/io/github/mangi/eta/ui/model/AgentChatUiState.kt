@@ -6,6 +6,7 @@ import io.github.mangi.eta.agent.model.AgentModelClient
 import io.github.mangi.eta.agent.roleplay.RoleplayBinding
 import io.github.mangi.eta.agent.roleplay.RoleplayMessageState
 import io.github.mangi.eta.data.model.ReasoningEffort
+import io.github.mangi.eta.ui.components.RoleplayChatUi
 
 @Immutable
 internal data class AgentChatUiState(
@@ -25,6 +26,8 @@ internal data class AgentChatUiState(
     val messageEdit: MessageEditUiState? = null,
     val roleplay: RoleplayBinding? = null,
     val roleplayMessages: RoleplayMessageState = RoleplayMessageState(),
+    /** 会话最近一次发送使用的本地 Model.id；null 表示尚未绑定，跟随默认模型。 */
+    val modelId: String? = null,
 ) {
     val canCompactContext: Boolean get() = !isStreaming && messageEdit == null && history.any {
         !it.contextSummary && (it.role == "assistant" || it.role == "tool")
@@ -54,6 +57,7 @@ data class AgentMessageUi(
     val characterEditable: Boolean = false,
     val candidateCount: Int = 1,
     val selectedCandidate: Int = 0,
+    val protocolRejected: Boolean = false,
 ) : AgentChatMessageUi
 
 enum class SystemNoticeCode(val wireValue: String) {
@@ -61,6 +65,7 @@ enum class SystemNoticeCode(val wireValue: String) {
     EmptyResult("empty_result"),
     RuntimeFailed("runtime_failed"),
     ModelRetry("model_retry"),
+    ModelIdentity("model_identity"),
     ContextCompaction("context_compaction"),
     Interrupted("interrupted");
 
@@ -80,6 +85,10 @@ data class SystemNoticeMessageUi(
     val contextTokens: Int? = null,
     /** 仅运行期存在的进行中标记，不随消息持久化；恢复的历史通知始终视为已结束。 */
     val running: Boolean = false,
+    /** Bounded safe failure fields; no request body, provider text or credentials. */
+    val diagnosticJson: String? = null,
+    /** Safe saved slice counts/time; running remains a live-only property. */
+    val compactionProgressJson: String? = null,
 ) : AgentChatMessageUi
 
 @Immutable
@@ -181,3 +190,8 @@ data class MessageEditUiState(
     val hasLaterTurns: Boolean,
     val preserveFollowingMessages: Boolean = false,
 )
+
+/** 角色对话在界面上的身份投影；普通对话返回 null。 */
+internal fun AgentChatHomeUiState.roleplayChatUi(): RoleplayChatUi? = roleplay?.let {
+    RoleplayChatUi(characterName = it.characterName, avatarPath = it.avatarPath, userName = it.userName)
+}

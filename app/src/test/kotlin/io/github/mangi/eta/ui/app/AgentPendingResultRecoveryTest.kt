@@ -16,6 +16,25 @@ import org.junit.Test
 
 class AgentPendingResultRecoveryTest {
     @Test
+    fun recoveredFailureNoticeKeepsDiagnosticAndPartialResponse() {
+        val partial = AgentMessageUi("assistant-failed-run-1-0", "部分输出", isStreaming = true)
+        val diagnostic = """{"code":"MODEL_TIMEOUT","phase":"response_body"}"""
+        val notice = SystemNoticeMessageUi("assistant-failed-run-failure", SystemNoticeCode.RuntimeFailed, "旧提示", diagnosticJson = diagnostic)
+        val state = AgentChatUiState(messages = listOf(partial, notice), input = "", isStreaming = true, thinkingEnabled = false)
+        val recovered = AgentPendingResultRecovery.apply(state, "failed-run",
+            AgentRuntimeWire.RunResult("failed-run", false, "", error = "超时"), supplements = emptyList())
+        assertEquals("部分输出", recovered.state.messages.filterIsInstance<AgentMessageUi>().single().content)
+        assertFalse(recovered.state.messages.filterIsInstance<AgentMessageUi>().single().isStreaming)
+        val failed = recovered.state.messages.filterIsInstance<SystemNoticeMessageUi>().single()
+        assertEquals(diagnostic, failed.diagnosticJson)
+        assertEquals("超时", failed.detail)
+        val replay = AgentPendingResultRecovery.apply(recovered.state, "failed-run",
+            AgentRuntimeWire.RunResult("failed-run", false, "", error = "超时"), supplements = emptyList())
+        assertTrue(replay.alreadyApplied)
+        assertEquals(recovered.state, replay.state)
+    }
+
+    @Test
     fun recoveryDoesNotReplaceFailedAttemptOrRetryNotice() {
         val partial = AgentMessageUi(id = "assistant-retry-run-1-0", content = "半截回答")
         val notice = SystemNoticeMessageUi(

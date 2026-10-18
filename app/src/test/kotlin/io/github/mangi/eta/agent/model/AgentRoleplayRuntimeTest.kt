@@ -12,6 +12,26 @@ import org.junit.Test
 
 class AgentRoleplayRuntimeTest {
     @Test
+    fun unknownWindowKeepsCharacterChatWithUpstreamDefaultWorldbookBudget() {
+        val card = CharacterCardCodec.decodeJson("""{"name":"林舟","description":"一位旅人",
+            "character_book":{"token_budget":100,"entries":[
+                {"constant":true,"content":"WORLD_BOOK_ONLY","enabled":true}
+            ]}}""")
+        val context = roleplay().copy(card = card, contextWindow = null)
+        assertTrue(context.copy(contextWindow = 128_000)
+            .projectMessages(JSONArray().put(context.personaMessage())).toString().contains("WORLD_BOOK_ONLY"))
+        val result = AgentModelClient.complete(
+            config = config().copy(contextWindow = null), prompt = "同行", roleplayContext = context,
+            provider = provider { request ->
+                assertTrue(request.messages.toString().contains("林舟"))
+                assertTrue(request.messages.toString().contains("WORLD_BOOK_ONLY"))
+                reply("我们走吧。")
+            }, toolExecutor = { error("无需工具") },
+        )
+        assertEquals("我们走吧。", result.content)
+    }
+
+    @Test
     fun continuationPromptAndLaterSteeringKeepTheirUiSupplementIdentifiers() {
         val controller = AgentRunController()
         controller.steer("后一条补充")
@@ -138,7 +158,7 @@ class AgentRoleplayRuntimeTest {
                 {"keys":["tower.png"],"content":"不该被图片链接触发"},
                 {"keys":["钟楼"],"content":"正文触发的设定"}
             ]}
-        }"""), "用户", "")
+        }"""), "用户", "", contextWindow = 128_000)
         val input = JSONArray().put(context.personaMessage()).put(JSONObject().put("role", "user").put("content",
             JSONArray().put(JSONObject().put("type", "text").put("text", "前往钟楼"))
                 .put(JSONObject().put("type", "image_url").put("image_url", JSONObject().put("url", "https://example.com/tower.png")))))
@@ -148,7 +168,7 @@ class AgentRoleplayRuntimeTest {
     }
 
     @Test
-    fun worldbookBudgetUsesRemainingInputAfterToolSchemas() {
+    fun worldbookBudgetUsesConfiguredWindowWithoutEstimatingDialogue() {
         val lore = "世界知识".repeat(1_000)
         val card = CharacterCardCodec.decodeJson(JSONObject().put("name", "林舟")
             .put("character_book", JSONObject().put("entries", JSONArray().put(JSONObject()
@@ -156,8 +176,9 @@ class AgentRoleplayRuntimeTest {
         val context = RoleplayRunContext("fixture", card, "用户", "", contextWindow = 64_000)
         val source = JSONArray().put(context.personaMessage()).put(AgentConversationCodec.userTextMessage("出发"))
         assertTrue(context.projectMessages(source).toString().contains(lore))
-        val tools = JSONArray().put(JSONObject().put("description", "工具约束".repeat(20_000)))
-        assertFalse(context.projectMessages(source, tools).toString().contains(lore))
+        source.put(JSONObject().put("role", "assistant").put("content", "长历史".repeat(30_000)))
+        assertTrue(context.projectMessages(source).toString().contains(lore))
+        assertFalse(context.copy(contextWindow = 8_000).projectMessages(source).toString().contains(lore))
     }
 
     @Test
@@ -166,7 +187,7 @@ class AgentRoleplayRuntimeTest {
             val card = CharacterCardCodec.decodeJson("""{
                 "name":"林舟","extensions":{"depth_prompt":{"prompt":"深度设定","depth":1,"role":"$depthRole"}}
             }""")
-            val context = RoleplayRunContext("fixture", card, "用户", "")
+            val context = RoleplayRunContext("fixture", card, "用户", "", contextWindow = 128_000)
             val source = JSONArray().put(context.personaMessage())
                 .put(AgentConversationCodec.userTextMessage("第一句").put("_eta_message_id", "first-id"))
                 .put(JSONObject().put("role", "assistant").put("content", "第二句"))
@@ -201,16 +222,18 @@ class AgentRoleplayRuntimeTest {
             messages.put(JSONObject().put("role", "assistant").put("content", "剧情内容".repeat(300)))
         }
         val result = AgentContextCompactor(config(), provider, AgentRunController(), roleplay = true)
-            .compact(messages, 1, emptySet(), force = true)
+            .compact(messages, 1, emptySet())
         assertTrue(result.toString().contains("剧情：二人在塔下相识"))
     }
 
     private fun roleplay() = RoleplayRunContext(
         "fixture", CharacterCardCodec.create("林舟").withEdits(description = "一位旅人"), "旅伴", "",
+        contextWindow = 128_000,
     )
 
     private fun config() = AgentModelClient.ModelConfig(
         baseUrl = "https://fixture.invalid/v1", apiKey = "fixture", model = "fixture",
+        contextWindow = 128_000,
         systemPrompt = "PROVIDER_IDENTITY", browserTools = false,
     )
 

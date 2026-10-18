@@ -39,20 +39,20 @@ class AgentCompactionProviderTest {
             listOf("user", "assistant", "system").forEach { role ->
                 val card = CharacterCardCodec.decodeJson("""{"name":"林舟","extensions":{"depth_prompt":{
                     "prompt":"深度设定","depth":1,"role":"$role"}}}""")
-                val context = RoleplayRunContext("fixture", card, "用户", "")
+                val context = RoleplayRunContext("fixture", card, "用户", "", contextWindow = 128_000)
                 val source = JSONArray().put(context.personaMessage())
                     .put(AgentConversationCodec.userTextMessage("第一句").put("_eta_message_id", "first"))
                     .put(JSONObject().put("role", "assistant").put("content", "第二句"))
                 val config = AgentModelClient.ModelConfig(
                     baseUrl = "http://127.0.0.1:${server.address.port}", apiKey = "fixture",
-                    model = "fixture", systemPrompt = "",
+                    model = "fixture", systemPrompt = "", providerType = io.github.mangi.eta.data.model.ProviderTypes.ANTHROPIC,
                 )
                 assertThrows(AgentModelFailure::class.java) {
                     AnthropicMessagesProvider.complete(ProviderRequest(config, context.projectMessages(source), JSONArray()), AgentRunController())
                 }
                 val body = captured.get()
                 assertFalse(body.toString().contains("_eta_message_id"))
-                if (role == "system") assertTrue(body.getString("system").contains("深度设定")) else {
+                if (role == "system") assertTrue(body.getJSONArray("system").getJSONObject(0).getString("text").contains("深度设定")) else {
                     val text = body.getJSONArray("messages").toString()
                     assertTrue(text.indexOf("第一句") < text.indexOf("深度设定"))
                     assertTrue(text.indexOf("深度设定") < text.indexOf("第二句"))

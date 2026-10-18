@@ -21,7 +21,7 @@ import org.robolectric.annotation.Config
 @Config(sdk = [36])
 class EtaDatabaseMigrationTest {
     @Test
-    fun migration6To21PreservesDataAndMovesCompleteConversationContext() {
+    fun migration6To24PreservesDataAndMovesCompleteConversationContext() {
         val context = RuntimeEnvironment.getApplication() as Context
         val databaseName = "migration-${UUID.randomUUID()}.db"
         createVersion6Database(context, databaseName)
@@ -54,6 +54,9 @@ class EtaDatabaseMigrationTest {
                 EtaDatabase.MIGRATION_18_19,
                 EtaDatabase.MIGRATION_19_20,
                 EtaDatabase.MIGRATION_20_21,
+                EtaDatabase.MIGRATION_21_22,
+                EtaDatabase.MIGRATION_22_23,
+                EtaDatabase.MIGRATION_23_24,
             )
             .build()
         try {
@@ -114,6 +117,7 @@ class EtaDatabaseMigrationTest {
             assertEquals("", conversations.first { it.id == "conv-1" }.revisionsJson)
             assertEquals(emptyList<CharacterEntity>(), runBlocking(Dispatchers.IO) { database.characterDao().characters() })
             assertEquals("off", conversations.first { it.id == "conv-1" }.reasoningEffort)
+            assertEquals(null, conversations.first { it.id == "conv-1" }.modelId)
             assertEquals("default", conversations.first { it.id == "conv-enabled" }.reasoningEffort)
             assertEquals(null, runBlocking(Dispatchers.IO) { database.conversationDao().state() })
             assertEquals(listOf("built-in", "manual"), provider.models.map { it.modelId })
@@ -123,12 +127,129 @@ class EtaDatabaseMigrationTest {
             assertEquals(listOf("mcp-1"), mcpServers.map { it.id })
             assertEquals(null, mcpServers.single().toolsExpireAt)
             assertEquals(null, provider.models.first().contextWindowOverride)
+            assertEquals("unknown", provider.models.first().contextWindowKind)
+            assertEquals(null, provider.models.first().inputTokenLimit)
             assertEquals(null, provider.models.first().reasoningOverride)
             assertEquals(null, provider.models.first().reasoningCapabilitiesOverride)
             assertEquals(
                 listOf(ModelSource.CATALOG, ModelSource.MANUAL),
                 provider.models.map { it.source },
             )
+        } finally {
+            database.close()
+            context.deleteDatabase(databaseName)
+        }
+    }
+
+    @Test
+    fun migration22To24PreservesOverridesAndRows() {
+        val context = RuntimeEnvironment.getApplication() as Context
+        // Robolectric includes the method name in its temp directory. Keep Windows SQLite WAL paths short.
+        val databaseName = "m23-${UUID.randomUUID().toString().take(8)}.db"
+        createVersion6Database(context, databaseName)
+        val to22 = listOf(
+            EtaDatabase.MIGRATION_6_7, EtaDatabase.MIGRATION_7_8, EtaDatabase.MIGRATION_8_9,
+            EtaDatabase.MIGRATION_9_10, EtaDatabase.MIGRATION_10_11, EtaDatabase.MIGRATION_11_12,
+            EtaDatabase.MIGRATION_12_13, EtaDatabase.MIGRATION_13_14, EtaDatabase.MIGRATION_14_15,
+            EtaDatabase.MIGRATION_15_16, EtaDatabase.MIGRATION_16_17, EtaDatabase.MIGRATION_17_18,
+            EtaDatabase.MIGRATION_18_19, EtaDatabase.MIGRATION_19_20, EtaDatabase.MIGRATION_20_21,
+            EtaDatabase.MIGRATION_21_22,
+        )
+        val configuration = SupportSQLiteOpenHelper.Configuration.builder(context).name(databaseName)
+            .callback(object : SupportSQLiteOpenHelper.Callback(22) {
+                override fun onCreate(db: SupportSQLiteDatabase) = error("Expected existing version 6 fixture")
+                override fun onUpgrade(db: SupportSQLiteDatabase, oldVersion: Int, newVersion: Int) {
+                    assertEquals(6, oldVersion)
+                    assertEquals(22, newVersion)
+                    to22.forEach { it.migrate(db) }
+                }
+            }).build()
+        val helper = FrameworkSQLiteOpenHelperFactory().create(configuration)
+        val beforeModels: Int
+        val beforeMessages: Int
+        try {
+            val sqlite = helper.writableDatabase
+            assertEquals(22, sqlite.version)
+            sqlite.execSQL("UPDATE provider_models SET context_window = 960000, context_window_override = 480000, is_enabled = 0 WHERE id = 'manual-id'")
+            beforeModels = sqlite.query("SELECT COUNT(*) FROM provider_models").use { it.moveToFirst(); it.getInt(0) }
+            beforeMessages = sqlite.query("SELECT COUNT(*) FROM conversation_messages").use { it.moveToFirst(); it.getInt(0) }
+        } finally {
+            helper.close()
+        }
+        // Opening Room performs its complete schema validation after the real SQLite migration.
+        val database = Room.databaseBuilder(context, EtaDatabase::class.java, databaseName)
+            .addMigrations(EtaDatabase.MIGRATION_22_23, EtaDatabase.MIGRATION_23_24).build()
+        try {
+            val models = runBlocking(Dispatchers.IO) { database.providerDao().models("provider-1") }
+            assertEquals(beforeModels, models.size)
+            val manual = models.single { it.id == "manual-id" }
+            assertEquals(960_000, manual.contextWindow)
+            assertEquals(480_000, manual.contextWindowOverride)
+            assertEquals(false, manual.isEnabled)
+            assertEquals("unknown", manual.contextWindowKind)
+            assertEquals(null, manual.inputTokenLimit)
+            assertEquals(beforeMessages, runBlocking(Dispatchers.IO) { database.conversationDao().messages().size })
+            assertEquals(null, runBlocking(Dispatchers.IO) { database.providerDao().providerById("provider-1") }!!.provider.requestByteBudget)
+            assertEquals(24, database.openHelper.readableDatabase.version)
+        } finally {
+            database.close()
+            context.deleteDatabase(databaseName)
+        }
+    }
+
+    @Test
+    fun migration23To24KeepsProviderRows() {
+        val context = RuntimeEnvironment.getApplication() as Context
+        val databaseName = "m24-${UUID.randomUUID().toString().take(8)}.db"
+        createVersion6Database(context, databaseName)
+        val to23 = listOf(
+            EtaDatabase.MIGRATION_6_7, EtaDatabase.MIGRATION_7_8, EtaDatabase.MIGRATION_8_9,
+            EtaDatabase.MIGRATION_9_10, EtaDatabase.MIGRATION_10_11, EtaDatabase.MIGRATION_11_12,
+            EtaDatabase.MIGRATION_12_13, EtaDatabase.MIGRATION_13_14, EtaDatabase.MIGRATION_14_15,
+            EtaDatabase.MIGRATION_15_16, EtaDatabase.MIGRATION_16_17, EtaDatabase.MIGRATION_17_18,
+            EtaDatabase.MIGRATION_18_19, EtaDatabase.MIGRATION_19_20, EtaDatabase.MIGRATION_20_21,
+            EtaDatabase.MIGRATION_21_22, EtaDatabase.MIGRATION_22_23,
+        )
+        val helper = FrameworkSQLiteOpenHelperFactory().create(
+            SupportSQLiteOpenHelper.Configuration.builder(context).name(databaseName)
+                .callback(object : SupportSQLiteOpenHelper.Callback(23) {
+                    override fun onCreate(db: SupportSQLiteDatabase) = error("Expected fixture")
+                    override fun onUpgrade(db: SupportSQLiteDatabase, oldVersion: Int, newVersion: Int) {
+                        assertEquals(6, oldVersion)
+                        assertEquals(23, newVersion)
+                        to23.forEach { it.migrate(db) }
+                    }
+                }).build(),
+        )
+        val providerCount: Int
+        val messageCount: Int
+        val originalKey: String
+        try {
+            val db = helper.writableDatabase
+            assertEquals(23, db.version)
+            db.execSQL("UPDATE provider_models SET context_window_override = 480000 WHERE id = 'manual-id'")
+            providerCount = db.query("SELECT COUNT(*) FROM model_providers").use { it.moveToFirst(); it.getInt(0) }
+            messageCount = db.query("SELECT COUNT(*) FROM conversation_messages").use { it.moveToFirst(); it.getInt(0) }
+            originalKey = db.query("SELECT api_key FROM model_providers WHERE id = 'provider-1'").use { it.moveToFirst(); it.getString(0) }
+        } finally { helper.close() }
+        val database = Room.databaseBuilder(context, EtaDatabase::class.java, databaseName)
+            .addMigrations(EtaDatabase.MIGRATION_23_24).build()
+        try {
+            val dao = database.providerDao()
+            val before = runBlocking(Dispatchers.IO) { dao.providerById("provider-1") }!!
+            assertEquals(null, before.provider.requestByteBudget)
+            assertEquals(originalKey, before.provider.apiKey)
+            assertEquals(480_000, before.models.single { it.id == "manual-id" }.contextWindowOverride)
+            for (budget in listOf(null, 0, 512 * 1024, Int.MAX_VALUE)) {
+                runBlocking(Dispatchers.IO) { assertEquals(1, dao.updateProvider(before.provider.copy(requestByteBudget = budget))) }
+                val restored = runBlocking(Dispatchers.IO) { dao.providerById("provider-1") }!!
+                assertEquals(budget, restored.provider.requestByteBudget)
+                assertEquals(originalKey, restored.provider.apiKey)
+                assertEquals(before.models, restored.models)
+            }
+            assertEquals(providerCount, runBlocking(Dispatchers.IO) { dao.providers().size })
+            assertEquals(messageCount, runBlocking(Dispatchers.IO) { database.conversationDao().messages().size })
+            assertEquals(24, database.openHelper.readableDatabase.version)
         } finally {
             database.close()
             context.deleteDatabase(databaseName)

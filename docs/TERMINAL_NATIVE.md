@@ -12,7 +12,7 @@ PRoot 只支持本机对应的 64 位 Linux rootfs，不执行异构指令集，
 
 ## 运行接口
 
-PTY 参数为 `rows cols -- executable args...`，标准输入与输出传输原始终端字节。Ctrl-C 经 PTY 发送到当前前台进程组；输入管道关闭时发送终端 EOF；关闭窗口、父进程退出或输出管道断开时清理终端进程组。退出码保留子进程状态。交互窗口尺寸在启动时传入，调用方通过真实终端发送 SIGWINCH 时可同步其尺寸。
+PTY 参数为 `rows cols -- executable args...`，Root 与普通身份的控制台会话都由它建立独立 session。标准输出传输原始终端字节；标准输入按帧传输，帧头为 1 字节类型与 2 字节大端长度：类型 0 为终端字节，原样写入伪终端；类型 1 为窗口尺寸，载荷是大端 rows、cols 各 2 字节，取值 1 到 1000，写入后由内核向前台进程组发送 SIGWINCH；未知类型按长度跳过。Ctrl-C 作为终端字节经 PTY 发送到当前前台进程组；输入管道关闭时发送终端 EOF；关闭窗口、父进程退出或输出管道断开时清理终端进程组。退出码保留子进程状态。
 
 PRoot 调用方必须设置 `PROOT_LOADER` 为当前 `nativeLibraryDir/libproot_loader.so`，设置 `PROOT_TMP_DIR` 为 Eta 可写的私有临时目录。缺失加载器不会转而寻找其他应用的安装路径。共享内存补丁也使用同一临时目录，不依赖全局 `/tmp`。
 
@@ -21,7 +21,7 @@ PRoot 调用方必须设置 `PROOT_LOADER` 为当前 `nativeLibraryDir/libproot_
 构建需要与 `gradle/libs.versions.toml` 的 `ndk` 条目一致的 Android NDK、Python 3、GNU make、patch 与 tar，在 macOS 或 Linux 上运行：
 
 ```sh
-ANDROID_NDK_HOME=/path/to/android-ndk-r29 scripts/build-terminal-native.sh
+ANDROID_NDK_HOME=/path/to/android-ndk scripts/build-terminal-native.sh
 ```
 
 脚本先核对 NDK 的 `source.properties` 与版本目录，再使用 APK 同步附带的固定源码压缩包，并校验 SHA-256；缺少源码时才从上游固定版本地址下载。第三方源码版本、URL、摘要和编译参数以脚本为准。`ETA_NATIVE_SOURCES` 与 `ETA_NATIVE_BUILD` 可以分别指定源码缓存和临时构建目录。编译日志保存在构建目录中，不包含模型配置或用户文件。

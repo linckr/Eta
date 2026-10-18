@@ -10,9 +10,12 @@ import android.os.Parcel
 import android.os.ParcelFileDescriptor
 import io.github.mangi.eta.agent.model.AgentConversationCodec
 import io.github.mangi.eta.agent.model.AgentModelClient
+import io.github.mangi.eta.config.Prefs
+import io.github.mangi.eta.agent.model.CodexCompatibilityProfile
 import io.github.mangi.eta.data.model.CustomBody
 import io.github.mangi.eta.data.model.CustomHeader
 import io.github.mangi.eta.data.model.ModelReasoningCapabilities
+import io.github.mangi.eta.data.model.ProviderSourceTypes
 import io.github.mangi.eta.data.model.ReasoningEffort
 import java.io.Closeable
 import java.util.concurrent.atomic.AtomicBoolean
@@ -82,11 +85,20 @@ internal object AgentRuntimeWire {
     /** service -> client：返回是否成功重新订阅指定 run。 */
     const val MSG_ATTACH_RUN_RESPONSE = 12
 
+    /** client -> service：向指定的活动 run 追加一条文本指令。 */
+    const val MSG_STEER_RUN = 13
+
+    /** service -> client：确认指定补充指令是否已进入活动 run。 */
+    const val MSG_STEER_RUN_RESPONSE = 14
+
     private const val MODULE_PACKAGE = "io.github.mangi.eta"
     private const val SERVICE_CLASS = "io.github.mangi.eta.agent.runtime.AgentRuntimeService"
 
     private const val KEY_TYPE = "type"
     private const val KEY_RUN_ID = "run_id"
+    private const val KEY_STEER_REQUEST_ID = "steer_request_id"
+    private const val KEY_STEER_TEXT = "steer_text"
+    private const val KEY_STEER_REASON = "steer_reason"
     private const val KEY_PROMPT = "prompt"
     private const val KEY_ASSISTANT_SCREEN_CONTEXT = "assistant_screen_context"
     private const val KEY_MODEL_SESSION_ID = "model_session_id"
@@ -94,11 +106,18 @@ internal object AgentRuntimeWire {
     private const val KEY_PROVIDER_NAME = "provider_name"
     private const val KEY_PROVIDER_TYPE = "provider_type"
     private const val KEY_PROVIDER_SOURCE_TYPE = "provider_source_type"
+    private const val KEY_AUTH_MODE = "auth_mode"
     private const val KEY_BASE_URL = "base_url"
     private const val KEY_API_KEY = "api_key"
     private const val KEY_MODEL = "model"
     private const val KEY_MODEL_DISPLAY_NAME = "model_display_name"
     private const val KEY_CONTEXT_WINDOW = "context_window"
+    private const val KEY_CONTEXT_WINDOW_KIND = "context_window_kind"
+    private const val KEY_INPUT_TOKEN_LIMIT = "input_token_limit"
+    private const val KEY_REQUEST_BYTE_BUDGET = "request_byte_budget"
+    private const val KEY_COMPACTION_MODEL_ID = "compaction_model_id"
+    private const val KEY_COMPACTION_MODEL_CONFIG = "compaction_model_config"
+    private const val KEY_AUTO_COMPACTION_ENABLED = "auto_compaction_enabled"
     private const val KEY_SYSTEM_PROMPT = "system_prompt"
     private const val KEY_ANTHROPIC_VERSION = "anthropic_version"
     private const val KEY_OPENAI_ENDPOINT_MODE = "openai_endpoint_mode"
@@ -292,13 +311,34 @@ internal object AgentRuntimeWire {
         putString(KEY_PROVIDER_NAME, request.config.providerName)
         putString(KEY_PROVIDER_TYPE, request.config.providerType)
         putString(KEY_PROVIDER_SOURCE_TYPE, request.config.providerSourceType)
+        putString(KEY_AUTH_MODE, request.config.authMode)
         putString(KEY_BASE_URL, request.config.baseUrl)
-        putString(KEY_API_KEY, request.config.apiKey)
+        putString(
+            KEY_API_KEY,
+            if (request.config.authMode == CodexCompatibilityProfile.AUTH_MODE ||
+                request.config.providerSourceType == ProviderSourceTypes.OPENAI_CODEX ||
+                request.config.providerId == io.github.mangi.eta.data.provider.BuiltinProviders.OPENAI_CODEX_ID
+            ) {
+                ""
+            } else {
+                request.config.apiKey
+            },
+        )
         putString(KEY_MODEL, request.config.model)
         putString(KEY_MODEL_DISPLAY_NAME, request.config.modelDisplayName)
         putString("operation", request.operation)
         request.rewriteTargetMessageId?.let { putString("rewrite_target_message_id", it) }
         request.config.contextWindow?.let { putInt(KEY_CONTEXT_WINDOW, it) }
+        putString(KEY_CONTEXT_WINDOW_KIND, request.config.contextWindowKind)
+        request.config.inputTokenLimit?.let { putInt(KEY_INPUT_TOKEN_LIMIT, it) }
+        request.config.requestByteBudget?.let { putInt(KEY_REQUEST_BYTE_BUDGET, it) }
+        putString(KEY_COMPACTION_MODEL_ID, request.config.compactionModelId)
+        request.config.compactionModelConfig?.let {
+            AgentWireText.put(this, KEY_COMPACTION_MODEL_CONFIG,
+                io.github.mangi.eta.data.repository.RuntimeConfigRepository.runtimeConfigJson(
+                    it.copy(compactionModelId = null, compactionModelConfig = null)), payloadDirectory)
+        }
+        putBoolean(KEY_AUTO_COMPACTION_ENABLED, request.config.autoCompactionEnabled)
         AgentWireText.put(this, KEY_SYSTEM_PROMPT, request.config.systemPrompt, payloadDirectory)
         putString(KEY_ANTHROPIC_VERSION, request.config.anthropicVersion)
         putString(KEY_OPENAI_ENDPOINT_MODE, request.config.openAiEndpointMode)
@@ -425,11 +465,27 @@ internal object AgentRuntimeWire {
                 providerType = bundle.getString(KEY_PROVIDER_TYPE).orEmpty()
                     .ifBlank { io.github.mangi.eta.data.model.ProviderTypes.OPENAI_COMPATIBLE },
                 providerSourceType = bundle.getString(KEY_PROVIDER_SOURCE_TYPE).orEmpty(),
+                authMode = bundle.getString(KEY_AUTH_MODE)
+                    ?.takeIf { it in setOf(CodexCompatibilityProfile.AUTH_MODE, CodexCompatibilityProfile.API_KEY_AUTH_MODE) }
+                    ?: CodexCompatibilityProfile.API_KEY_AUTH_MODE,
                 baseUrl = bundle.getString(KEY_BASE_URL).orEmpty(),
                 apiKey = bundle.getString(KEY_API_KEY).orEmpty(),
                 model = bundle.getString(KEY_MODEL).orEmpty(),
                 modelDisplayName = bundle.getString(KEY_MODEL_DISPLAY_NAME).orEmpty(),
                 contextWindow = bundle.optionalInt(KEY_CONTEXT_WINDOW),
+                contextWindowKind = io.github.mangi.eta.data.model.ModelContextWindowKind.normalize(
+                    bundle.getString(KEY_CONTEXT_WINDOW_KIND).orEmpty(),
+                ),
+                inputTokenLimit = bundle.optionalInt(KEY_INPUT_TOKEN_LIMIT),
+                requestByteBudget = bundle.optionalInt(KEY_REQUEST_BYTE_BUDGET)?.takeIf { it >= 0 },
+                compactionModelId = bundle.getString(KEY_COMPACTION_MODEL_ID)?.takeIf { it.isNotBlank() },
+                compactionModelConfig = if (readText) AgentWireText.read(bundle, KEY_COMPACTION_MODEL_CONFIG)?.let {
+                    json.decodeFromString<AgentModelClient.ModelConfig>(it).copy(compactionModelId = null, compactionModelConfig = null)
+                } else null,
+                autoCompactionEnabled = bundle.getBoolean(
+                    KEY_AUTO_COMPACTION_ENABLED,
+                    Prefs.Keys.BOOLEAN_DEFAULTS.getValue(Prefs.Keys.AGENT_AUTO_COMPACTION_ENABLED),
+                ),
                 systemPrompt = if (readText) AgentWireText.read(bundle, KEY_SYSTEM_PROMPT).orEmpty() else "",
                 anthropicVersion = bundle.getString(KEY_ANTHROPIC_VERSION).orEmpty()
                     .ifBlank { io.github.mangi.eta.data.model.AnthropicProviderSetting.DEFAULT_ANTHROPIC_VERSION },
@@ -588,6 +644,38 @@ internal object AgentRuntimeWire {
         putString(KEY_RUN_ID, runId)
     }
 
+    fun activeRunBundle(runId: String, handoff: EntryHandoff? = null): Bundle = ackBundle(runId).apply {
+        if (runId.isNotBlank() && handoff != null) putBundle(KEY_HANDOFF, toBundle(handoff))
+    }
+
+    fun activeRunHandoffFromBundle(bundle: Bundle): EntryHandoff? =
+        bundle.getBundle(KEY_HANDOFF)?.let(::entryHandoffFromBundle)
+
+    fun steerBundle(runId: String, requestId: String, text: String): Bundle = Bundle().apply {
+        putString(KEY_RUN_ID, runId)
+        putString(KEY_STEER_REQUEST_ID, requestId)
+        putString(KEY_STEER_TEXT, text)
+    }
+
+    fun steerRequestIdFromBundle(bundle: Bundle): String =
+        bundle.getString(KEY_STEER_REQUEST_ID).orEmpty()
+
+    fun steerTextFromBundle(bundle: Bundle): String =
+        bundle.getString(KEY_STEER_TEXT).orEmpty()
+
+    fun steerResponseBundle(requestId: String, accepted: Boolean, reason: String? = null): Bundle = Bundle().apply {
+        putString(KEY_STEER_REQUEST_ID, requestId)
+        putBoolean(KEY_OK, accepted)
+        reason?.let { putString(KEY_STEER_REASON, it) }
+    }
+
+    fun steerResponseRequestId(bundle: Bundle): String =
+        bundle.getString(KEY_STEER_REQUEST_ID).orEmpty()
+
+    fun steerAccepted(bundle: Bundle): Boolean = bundle.getBoolean(KEY_OK)
+
+    fun steerRejectionReason(bundle: Bundle): String? = bundle.getString(KEY_STEER_REASON)
+
     fun attachRunResponseBundle(runId: String, attached: Boolean): Bundle = Bundle().apply {
         putString(KEY_RUN_ID, runId)
         putBoolean(KEY_OK, attached)
@@ -634,10 +722,18 @@ internal object AgentRuntimeWire {
             is AgentEvent.ContextCompaction -> {
                 putString(KEY_TYPE, "context_compaction")
                 putString("operation_id", event.operationId)
-                putString("phase", event.phase)
-                putInt("tokens_before", event.tokensBefore)
+                // Old injected processes only know started/completed; keep progress visibly running there.
+                putString("phase", if (event.phase == AgentEvent.ContextCompaction.PHASE_PROGRESS) AgentEvent.ContextCompaction.PHASE_STARTED else event.phase)
+                if (event.phase == AgentEvent.ContextCompaction.PHASE_PROGRESS) putBoolean("progress_event", true)
+                event.tokensBefore?.let { putInt("tokens_before", it) }
                 event.tokensAfter?.let { putInt("tokens_after", it) }
                 putString("reason_code", event.reasonCode)
+                event.completedSlices?.takeIf { it >= 0 }?.let { putInt("completed_slices", it) }
+                event.totalSlices?.takeIf { it > 0 }?.let { putInt("total_slices", it) }
+                event.elapsedMs?.takeIf { it >= 0 }?.let { putLong("elapsed_ms", it) }
+                event.processedPercent?.takeIf { it in 0..100 }?.let { putInt("processed_percent", it) }
+                event.activity?.let { ContextCompactionActivity.decode(it.encode()) }
+                    ?.let { putString("compaction_activity", it.encode().toString()) }
             }
 
             is AgentEvent.ModelRetryScheduled -> {
@@ -647,6 +743,7 @@ internal object AgentRuntimeWire {
                 putInt("max_attempts", event.maxAttempts)
                 putInt("delay_ms", event.delayMs)
                 putString("reason_code", event.reasonCode)
+                putString("failure_diagnostic", ModelFailureDiagnostic.sanitize(event.diagnosticJson))
             }
 
             is AgentEvent.ProviderRequestStarted -> {
@@ -658,6 +755,13 @@ internal object AgentRuntimeWire {
                 putString(KEY_TYPE, "provider_response_started")
                 putInt("round", event.round)
                 putInt("http_code", event.httpCode)
+            }
+
+            is AgentEvent.ModelIdentityObserved -> {
+                putString(KEY_TYPE, "model_identity_observed")
+                putInt("round", event.round)
+                putString("requested_model_id", event.requestedModelId)
+                putString("reported_model_id", event.reportedModelId)
             }
 
             is AgentEvent.AssistantBlockStart -> {
@@ -707,6 +811,7 @@ internal object AgentRuntimeWire {
                 putString(KEY_TYPE, "user_supplement_received")
                 putInt("index", event.index)
                 putString("text", event.text)
+                putString("request_id", event.requestId)
             }
 
             is AgentEvent.ToolStarted -> {
@@ -761,6 +866,7 @@ internal object AgentRuntimeWire {
             is AgentEvent.RunFailed -> {
                 putString(KEY_TYPE, "run_failed")
                 putString("reason", event.reason)
+                putString("failure_diagnostic", ModelFailureDiagnostic.sanitize(event.diagnosticJson))
             }
         }
     }
@@ -781,10 +887,23 @@ internal object AgentRuntimeWire {
 
         "context_compaction" -> AgentEvent.ContextCompaction(
             operationId = bundle.getString("operation_id").orEmpty(),
-            phase = bundle.getString("phase").orEmpty(),
-            tokensBefore = bundle.getInt("tokens_before"),
+            phase = bundle.getString("phase").orEmpty().let { phase ->
+                if (phase == AgentEvent.ContextCompaction.PHASE_STARTED &&
+                    (bundle.getBoolean("progress_event", false) || bundle.containsKey("completed_slices") || bundle.containsKey("total_slices") ||
+                        bundle.containsKey("elapsed_ms") || bundle.containsKey("processed_percent"))) {
+                    AgentEvent.ContextCompaction.PHASE_PROGRESS
+                } else phase
+            },
+            tokensBefore = bundle.optionalInt("tokens_before"),
             tokensAfter = bundle.optionalInt("tokens_after"),
             reasonCode = bundle.getString("reason_code").orEmpty(),
+            completedSlices = bundle.optionalInt("completed_slices")?.takeIf { it >= 0 },
+            totalSlices = bundle.optionalInt("total_slices")?.takeIf { it > 0 },
+            elapsedMs = if (bundle.containsKey("elapsed_ms")) (bundle.get("elapsed_ms") as? Number)?.toLong()?.takeIf { it >= 0 } else null,
+            processedPercent = bundle.optionalInt("processed_percent")?.takeIf { it in 0..100 },
+            activity = bundle.getString("compaction_activity")?.takeIf { it.length <= 512 }?.let {
+                runCatching { ContextCompactionActivity.decode(org.json.JSONObject(it)) }.getOrNull()
+            },
         )
         "model_retry_scheduled" -> AgentEvent.ModelRetryScheduled(
             round = bundle.getInt("round"),
@@ -792,6 +911,7 @@ internal object AgentRuntimeWire {
             maxAttempts = bundle.getInt("max_attempts", 3),
             delayMs = bundle.getInt("delay_ms", 2_000),
             reasonCode = bundle.getString("reason_code").orEmpty(),
+            diagnosticJson = ModelFailureDiagnostic.sanitize(bundle.getString("failure_diagnostic")),
         )
 
         "provider_request_started" -> AgentEvent.ProviderRequestStarted(
@@ -801,6 +921,12 @@ internal object AgentRuntimeWire {
         "provider_response_started" -> AgentEvent.ProviderResponseStarted(
             round = bundle.getInt("round"),
             httpCode = bundle.getInt("http_code"),
+        )
+
+        "model_identity_observed" -> AgentEvent.ModelIdentityObserved(
+            round = bundle.getInt("round"),
+            requestedModelId = bundle.getString("requested_model_id").orEmpty(),
+            reportedModelId = bundle.getString("reported_model_id"),
         )
 
         "assistant_block_start" -> AgentEvent.AssistantBlockStart(
@@ -850,6 +976,7 @@ internal object AgentRuntimeWire {
         "user_supplement_received" -> AgentEvent.UserSupplementReceived(
             index = bundle.getInt("index"),
             text = bundle.getString("text").orEmpty(),
+            requestId = bundle.getString("request_id").orEmpty(),
         )
 
         "tool_started" -> AgentEvent.ToolStarted(
@@ -898,6 +1025,7 @@ internal object AgentRuntimeWire {
 
         "run_failed" -> AgentEvent.RunFailed(
             reason = bundle.getString("reason").orEmpty(),
+            diagnosticJson = ModelFailureDiagnostic.sanitize(bundle.getString("failure_diagnostic")),
         )
 
         else -> null

@@ -338,6 +338,52 @@ class RemoteModelFetcherTest {
     }
 
     @Test
+    fun separatesTotalWindowFromInputLimitAcrossCatalogProtocols() {
+        val body = """{"data":[{"id":"mixed","context_window":128000,"max_input_tokens":96000}]}"""
+        for (models in listOf(RemoteModelFetcher.parseOpenAiModels(body), RemoteModelFetcher.parseAnthropicModels(body))) {
+            val model = models.single()
+            assertEquals(128_000, model.contextWindow)
+            assertEquals("total", model.contextWindowKind)
+            assertEquals(96_000, model.inputTokenLimit)
+        }
+        val codex = RemoteModelFetcher.parseCodexModels(
+            """{"models":[{"slug":"mixed","context_window":128000,"max_input_tokens":96000}]}""").single()
+        assertEquals(128_000, codex.contextWindow)
+        assertEquals("total", codex.contextWindowKind)
+        assertEquals(96_000, codex.inputTokenLimit)
+    }
+
+    @Test
+    fun inputOnlyCapacityIsNotPromotedToTotalWindow() {
+        val body = """{"data":[{"id":"input-only","max_input_tokens":96000}]}"""
+        for (models in listOf(RemoteModelFetcher.parseOpenAiModels(body), RemoteModelFetcher.parseAnthropicModels(body))) {
+            assertEquals(96_000, models.single().contextWindow)
+            assertEquals(96_000, models.single().inputTokenLimit)
+            assertEquals("input", models.single().contextWindowKind)
+        }
+        val missing = RemoteModelFetcher.parseOpenAiModels("""{"data":[{"id":"unknown"}]}""").single()
+        assertEquals(null, missing.contextWindow)
+        assertEquals(null, missing.inputTokenLimit)
+        assertEquals("unknown", missing.contextWindowKind)
+    }
+
+    @Test
+    fun conflictingAliasesUseFixedPrecedenceAndSkipInvalidValues() {
+        val models = RemoteModelFetcher.parseOpenAiModels("""{"data":[
+            {"id":"conflict","context_window":128000,"context_length":256000,"max_input_tokens":96000,"maxInputTokens":48000},
+            {"id":"fallback","context_window":0,"context_length":256000,"max_input_tokens":-1,"maxInputTokens":96000},
+            {"id":"invalid-total","context_window":{},"max_input_tokens":96000},
+            {"id":"fraction","context_window":12.5,"max_input_tokens":999999999999}
+        ]}""").associateBy { it.modelId }
+        assertEquals(128_000, models.getValue("conflict").contextWindow)
+        assertEquals(96_000, models.getValue("conflict").inputTokenLimit)
+        assertEquals(256_000, models.getValue("fallback").contextWindow)
+        assertEquals(96_000, models.getValue("fallback").inputTokenLimit)
+        assertEquals("input", models.getValue("invalid-total").contextWindowKind)
+        assertEquals("unknown", models.getValue("fraction").contextWindowKind)
+    }
+
+    @Test
     fun ignoresUnexpectedMetadataTypesWithoutFailingWholeModelList() {
         val models = RemoteModelFetcher.parseOpenAiModels(
             """

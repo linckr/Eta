@@ -12,6 +12,15 @@ import org.junit.Test
 
 class ProviderComponentsTest {
     @Test
+    fun contextCapacityDescriptionsDistinguishAutomaticSemanticsAndManualOverride() {
+        val model = Model("m", "fixture", "Fixture", contextWindow = 128_000)
+        assertEquals(R.string.provider_context_kind_unknown, contextWindowKindResource(model))
+        assertEquals(R.string.provider_context_kind_total, contextWindowKindResource(model.copy(contextWindowKind = "total")))
+        assertEquals(R.string.provider_context_kind_input, contextWindowKindResource(model.copy(contextWindowKind = "input")))
+        assertEquals(R.string.provider_context_kind_unknown,
+            contextWindowKindResource(model.copy(contextWindowKind = "total", contextWindowOverride = 64_000)))
+    }
+    @Test
     fun providerDraftSaverPreservesUnsavedConfiguration() {
         val draft = ProviderConfigDraft(
             headers = listOf(ProviderHeaderDraft(header = io.github.mangi.eta.data.model.CustomHeader("User-Agent", "test-client"))),
@@ -23,6 +32,7 @@ class ProviderComponentsTest {
             endpointMode = "responses",
             hostedWebSearchEnabled = true,
             anthropicVersion = "2023-06-01",
+            requestByteBudgetKiB = "256.5",
         )
 
         val saved = with(ProviderConfigDraftSaver) {
@@ -33,17 +43,103 @@ class ProviderComponentsTest {
     }
 
     @Test
+    fun requestByteBudgetInputKeepsDefaultDisabledAndExactBytesWithoutOverflow() {
+        assertNull(requestByteBudgetFromKiB("  "))
+        assertEquals(0, requestByteBudgetFromKiB("0"))
+        assertEquals(512 * 1024, requestByteBudgetFromKiB("512"))
+        assertEquals(262656, requestByteBudgetFromKiB("256.5"))
+        for (bytes in listOf(null, 0, 1, 512 * 1024, Int.MAX_VALUE)) {
+            assertEquals(bytes, requestByteBudgetFromKiB(requestByteBudgetKiBText(bytes)))
+        }
+        for (invalid in listOf("-1", "2097152", "999999999999999999999", "0.001", "NaN", "1e3", "1,024")) {
+            org.junit.Assert.assertTrue(requestByteBudgetInputError(invalid))
+        }
+        org.junit.Assert.assertFalse(requestByteBudgetInputError(""))
+    }
+
+    @Test
+    fun updatedProviderCopiesPreserveBudgetUnlessExplicitlyChanged() {
+        val providers = listOf<io.github.mangi.eta.data.model.ProviderSetting>(
+            io.github.mangi.eta.data.model.OpenAiCompatibleProviderSetting("o", "Fixture", "https://example.invalid", requestByteBudget = 128 * 1024),
+            io.github.mangi.eta.data.model.AnthropicProviderSetting("a", "Fixture", "https://example.invalid", requestByteBudget = 128 * 1024),
+            CustomProviderSetting("c", "Fixture", "https://example.invalid", requestByteBudget = 128 * 1024),
+        )
+        for (provider in providers) {
+            val draft = ProviderConfigDraft.from(provider)
+            assertEquals("128", draft.requestByteBudgetKiB)
+            val saved = with(ProviderConfigDraftSaver) { SaverScope { true }.save(draft) }
+            assertEquals(draft, ProviderConfigDraftSaver.restore(requireNotNull(saved)))
+            val unchanged = buildUpdatedProvider(provider, draft.name, draft.baseUrl, draft.apiKey,
+                draft.systemPrompt, draft.isEnabled, draft.endpointMode, draft.hostedWebSearchEnabled,
+                draft.anthropicVersion, emptyList())
+            assertEquals(128 * 1024, unchanged.requestByteBudget)
+            val disabled = buildUpdatedProvider(provider, draft.name, draft.baseUrl, draft.apiKey,
+                draft.systemPrompt, draft.isEnabled, draft.endpointMode, draft.hostedWebSearchEnabled,
+                draft.anthropicVersion, emptyList(), requestByteBudget = 0)
+            assertEquals(0, disabled.requestByteBudget)
+            val restoredDefault = buildUpdatedProvider(provider, draft.name, draft.baseUrl, draft.apiKey,
+                draft.systemPrompt, draft.isEnabled, draft.endpointMode, draft.hostedWebSearchEnabled,
+                draft.anthropicVersion, emptyList(), requestByteBudget = null)
+            assertNull(restoredDefault.requestByteBudget)
+        }
+    }
+
+    @Test
     fun validatesOptionalPositiveContextWindowOverride() {
-        assertEquals(null, contextWindowInputError(""))
+        assertNull(contextWindowInputError(""))
         assertEquals(null, contextWindowInputError(" 256000 "))
         assertEquals("Context window must be a positive integer", contextWindowInputError("0"))
         assertEquals("Context window must be a positive integer", contextWindowInputError("999999999999"))
     }
 
     @Test
+    fun automaticContextWindowDisplaysWithoutCreatingAnOverride() {
+        val draft = ContextWindowEditDraft(128_000, null)
+        assertEquals("128000", draft.text)
+        assertNull(draft.overrideForSave())
+        assertNull(draft.copy(text = " 128000 ").overrideForSave())
+        assertEquals(64_000, draft.copy(text = "64000").overrideForSave())
+    }
+
+    @Test
+    fun storedOverrideSurvivesUnchangedSaveAndClearingRestoresAutomatic() {
+        val draft = ContextWindowEditDraft(128_000, 64_000)
+        assertEquals("64000", draft.text)
+        assertEquals(64_000, draft.overrideForSave())
+        assertEquals(128_000, ContextWindowEditDraft(128_000, 128_000).overrideForSave())
+        assertNull(draft.copy(text = "").overrideForSave())
+        assertNull(contextWindowInputError("   "))
+    }
+
+    @Test
+    fun refreshedWindowUpdatesPristineDraftButPreservesUserEdits() {
+        val draft = ContextWindowEditDraft(128_000, null)
+        val refreshed = draft.refresh(256_000, null)
+        assertEquals("256000", refreshed.text)
+        assertNull(refreshed.overrideForSave())
+        val manualRefresh = ContextWindowEditDraft(128_000, 64_000).refresh(256_000, 96_000)
+        assertEquals("96000", manualRefresh.text)
+        assertEquals(96_000, manualRefresh.overrideForSave())
+        val edited = draft.copy(text = "96000").refresh(256_000, null)
+        assertEquals("96000", edited.text)
+        assertEquals(96_000, edited.overrideForSave())
+        val cleared = draft.copy(text = "").refresh(256_000, null)
+        assertEquals("", cleared.text)
+        assertNull(cleared.overrideForSave())
+    }
+
+    @Test
+    fun unknownWindowRemainsBlankAndDoesNotInventCapacity() {
+        val draft = ContextWindowEditDraft(null, null)
+        assertEquals("", draft.text)
+        assertNull(draft.overrideForSave())
+        assertEquals("128000", draft.refresh(128_000, null).text)
+    }
+    @Test
     fun knownSourcesMapToDistinctBrandLogos() {
         val expected = mapOf(
             ProviderSourceTypes.OPENAI to R.drawable.provider_logo_openai,
+            ProviderSourceTypes.OPENAI_CODEX to R.drawable.provider_logo_codex,
             ProviderSourceTypes.ANTHROPIC to R.drawable.provider_logo_anthropic,
             ProviderSourceTypes.BAILIAN to R.drawable.provider_logo_bailian,
             ProviderSourceTypes.DEEPSEEK to R.drawable.provider_logo_deepseek,

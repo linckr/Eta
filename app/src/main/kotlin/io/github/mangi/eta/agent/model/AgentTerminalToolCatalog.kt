@@ -4,218 +4,84 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 internal object AgentTerminalToolCatalog {
+    val names = setOf("terminal", "terminal_job", "terminal_daemon")
+
     fun appendTo(tools: JSONArray) {
-        tools
-            .put(
-                AgentToolSchema.function(
-                    name = "terminal",
-                    description = "Manage terminal sessions on the current device. environment=android runs Android system commands and root operations; environment=linux runs the Alpine or Debian environment selected by the user. Apktool build is unavailable until an ARM64 AAPT2 runtime is installed. Use open_and_exec for one-shot commands. Use open to create a persistent shell session and exec with session_id for multi-step work. Use async=true without session_id for long-running independent commands, then read_async_result with job_id to stream output chunks. Use daemon_start for services that must keep running after the Agent run (listening ports, web panels, watchers): the process detaches from any command shell, logs to a file, and survives until daemon_stop or device reboot. Manage daemons with daemon_list, daemon_logs and daemon_stop by task_id. Use close to stop jobs or close sessions.",
-                    parameters = JSONObject()
-                        .put("type", "object")
-                        .put(
-                            "properties",
-                            JSONObject()
-                                .put(
-                                    "action",
-                                    JSONObject()
-                                        .put("type", "string")
-                                        .put(
-                                            "enum",
-                                            JSONArray()
-                                                .put("open")
-                                                .put("exec")
-                                                .put("open_and_exec")
-                                                .put("read_async_result")
-                                                .put("close")
-                                                .put("daemon_start")
-                                                .put("daemon_list")
-                                                .put("daemon_logs")
-                                                .put("daemon_stop")
-                                        )
-                                        .put("description", "open creates a session. exec runs command in a session or cwd. open_and_exec runs a one-shot command. read_async_result reads async output by job_id. close closes a session_id or job_id. daemon_start launches a detached long-lived service and returns task_id. daemon_list lists daemon tasks with liveness. daemon_logs tails a task log. daemon_stop terminates and removes a task.")
-                                )
-                                .put(
-                                    "identity",
-                                    JSONObject()
-                                        .put("type", "string")
-                                        .put("enum", JSONArray().put("user").put("root"))
-                                        .put("description", "宿主执行身份。Android 默认使用当前可用身份；Linux 根据已选择的后端使用 user 或 root。PRoot 内模拟 root 不授予 Android 特权。")
-                                )
-                                .put(
-                                    "environment",
-                                    JSONObject()
-                                        .put("type", "string")
-                                        .put("enum", JSONArray().put("android").put("linux"))
-                                        .put("description", "android uses the native Android shell with BusyBox applets when available. linux uses the Alpine or Debian environment selected in Eta settings. Default android.")
-                                )
-                                .put(
-                                    "command",
-                                    JSONObject()
-                                        .put("type", "string")
-                                        .put("description", "Android shell command to execute. Required for exec/open_and_exec.")
-                                )
-                                .put(
-                                    "cwd",
-                                    JSONObject()
-                                        .put("type", "string")
-                                        .put("description", "Working directory. Defaults to /data/local/tmp/eta for android and /workspace for linux. Relative paths use the environment default. ~/ means /storage/emulated/0.")
-                                )
-                                .put(
-                                    "timeout_ms",
-                                    JSONObject()
-                                        .put("type", "integer")
-                                        .put("description", "Command timeout in milliseconds. Default 30000, max 180000.")
-                                )
-                                .put(
-                                    "merge_stderr",
-                                    JSONObject()
-                                        .put("type", "boolean")
-                                        .put("description", "Whether stderr should be appended to stdout in command responses.")
-                                )
-                                .put(
-                                    "session_id",
-                                    JSONObject()
-                                        .put("type", "string")
-                                        .put("description", "Session id returned by action=open. Use with exec or close.")
-                                )
-                                .put(
-                                    "job_id",
-                                    JSONObject()
-                                        .put("type", "string")
-                                        .put("description", "Async job id returned when async=true. Use with read_async_result or close.")
-                                )
-                                .put(
-                                    "task_id",
-                                    JSONObject()
-                                        .put("type", "string")
-                                        .put("description", "Daemon task id returned by daemon_start. Use with daemon_logs or daemon_stop.")
-                                )
-                                .put(
-                                    "async",
-                                    JSONObject()
-                                        .put("type", "boolean")
-                                        .put("description", "Start command in a separate background shell and return immediately with job_id. Do not combine with session_id. Use read_async_result to stream output.")
-                                )
-                                .put(
-                                    "offset_chars",
-                                    JSONObject()
-                                        .put("type", "integer")
-                                        .put("description", "For read_async_result, read stdout from this character offset. Default 0.")
-                                )
-                                .put(
-                                    "max_chars",
-                                    JSONObject()
-                                        .put("type", "integer")
-                                        .put("description", "For read_async_result, maximum stdout characters to return. Default 8000, max 16000.")
-                                )
-                                .put(
-                                    "close_if_done",
-                                    JSONObject()
-                                        .put("type", "boolean")
-                                        .put("description", "For read_async_result, remove the async job when it has completed.")
-                                )
-                        )
-                        .put("required", JSONArray().put("action"))
-                )
-            )
-            .put(
-                AgentToolSchema.function(
-                    name = "run_command",
-                    description = "在 Android 设备上用非交互 Root Shell 执行命令。适合系统信息、包管理、文件检查、Linux 命令流水线。每次调用都是新 shell；不要运行交互式或长期驻留命令。",
-                    parameters = JSONObject()
-                        .put("type", "object")
-                        .put(
-                            "properties",
-                            JSONObject()
-                                .put(
-                                    "command",
-                                    JSONObject()
-                                        .put("type", "string")
-                                        .put("description", "要执行的 shell 命令，可使用管道和重定向。")
-                                )
-                                .put(
-                                    "cwd",
-                                    JSONObject()
-                                        .put("type", "string")
-                                        .put("description", "工作目录，默认 /data/local/tmp/eta。相对路径也按该目录解析；用户存储可用 ~/ 表示 /storage/emulated/0。")
-                                )
-                                .put(
-                                    "timeout_seconds",
-                                    JSONObject()
-                                        .put("type", "integer")
-                                        .put("description", "超时秒数，1 到 180，默认 30。")
-                                )
-                        )
-                        .put("required", JSONArray().put("command"))
-                )
-            )
-            .put(
-                AgentToolSchema.function(
-                    name = "read_file",
-                    description = "读取 Android 文件内容。适合读取配置、日志、小文本文件；大文件用 offset_bytes/max_bytes 分段读取。",
-                    parameters = JSONObject()
-                        .put("type", "object")
-                        .put(
-                            "properties",
-                            JSONObject()
-                                .put("path", JSONObject().put("type", "string"))
-                                .put(
-                                    "offset_bytes",
-                                    JSONObject()
-                                        .put("type", "integer")
-                                        .put("description", "从第几个字节开始，默认 0。")
-                                )
-                                .put(
-                                    "max_bytes",
-                                    JSONObject()
-                                        .put("type", "integer")
-                                        .put("description", "最多读取字节数，1 到 262144，默认 65536。")
-                                )
-                        )
-                        .put("required", JSONArray().put("path"))
-                )
-            )
-            .put(
-                AgentToolSchema.function(
-                    name = "write_file",
-                    description = "写入 Android 文件。可覆盖或追加；会自动创建父目录。用于明确需要修改文件的任务。",
-                    parameters = JSONObject()
-                        .put("type", "object")
-                        .put(
-                            "properties",
-                            JSONObject()
-                                .put("path", JSONObject().put("type", "string"))
-                                .put("content", JSONObject().put("type", "string"))
-                                .put(
-                                    "append",
-                                    JSONObject()
-                                        .put("type", "boolean")
-                                        .put("description", "true 追加，false 覆盖，默认 false。")
-                                )
-                        )
-                        .put("required", JSONArray().put("path").put("content"))
-                )
-            )
-            .put(
-                AgentToolSchema.function(
-                    name = "list_directory",
-                    description = "列出 Android 目录内容。默认 /data/local/tmp/eta，输出类似 ls -l。",
-                    parameters = JSONObject()
-                        .put("type", "object")
-                        .put(
-                            "properties",
-                            JSONObject()
-                                .put("path", JSONObject().put("type", "string"))
-                                .put("show_hidden", JSONObject().put("type", "boolean"))
-                                .put(
-                                    "limit",
-                                    JSONObject()
-                                        .put("type", "integer")
-                                        .put("description", "最多返回 1 到 200 行，默认 80。")
-                                )
-                        )
-                )
-            )
+        tools.put(
+            AgentToolSchema.function(
+                name = "terminal",
+                description = "执行 Shell 命令，直接提供 command 即可。默认环境、身份和工作目录见本次运行上下文。" +
+                    "需要保留 cd、环境变量等 Shell 状态时，先 action=open，再通过 session_id 执行命令，最后 action=close。" +
+                    "耗时命令使用 terminal_job；跨运行的后台服务使用 terminal_daemon。" +
+                    "已知文件的读写、编辑和搜索优先使用对应文件工具。",
+                parameters = parameters(
+                    commandProperties()
+                        .put("action", action("exec", "open", "close", "check_root")
+                            .put("description", "默认 exec 执行命令；open 创建持久 Shell；close 关闭会话；check_root 用固定的 su -c 'id -u' 检测并更新 Root 授权，不需要 command，可能显示系统授权请求。"))
+                        .put("session_id", text("open 返回的会话 ID。exec 沿用会话的目录、环境和身份；切换目录请在会话中执行 cd。")),
+                ),
+            ),
+        )
+        tools.put(
+            AgentToolSchema.function(
+                name = "terminal_job",
+                description = "启动可在本次回复结束后继续运行的后台命令。start 立即返回 job_id，完成或失败时发送系统通知；返回的 completion_notifications_enabled 表示当前通知是否可用。" +
+                    "list 查看任务，read 查看当前状态和日志，wait 在需要结果时等待，stop 终止任务。" +
+                    "日志保存为文件，read 返回 output_path；预览截断时可用 read_file 分页读取完整日志。" +
+                    "后台命令使用独立 Shell；不继承 terminal 会话。启动后可继续其他工作或回复用户，不必轮询等待。",
+                parameters = parameters(
+                    executionProperties()
+                        .put("action", action("start", "list", "read", "wait", "stop"))
+                        .put("command", text("start 要执行的完整命令。"))
+                        .put("description", text("可选的简短任务说明，用于列表和完成通知。"))
+                        .put("timeout_ms", integer("start 的命令运行上限，默认 600000 毫秒；0 表示不设超时。"))
+                        .put("job_id", text("start 或 list 返回的任务 ID；read、wait、stop 使用。"))
+                        .put("active_only", bool("list 是否只返回运行中的任务，默认 true。"))
+                        .put("max_bytes", integer("read 返回的日志尾部字节数，默认 16000，最多 65536；完整日志保存在 output_path。"))
+                        .put("wait_ms", integer("wait 最长等待毫秒数，默认 30000，最多 60000；等待超时不会停止命令。")),
+                    "action",
+                ),
+            ),
+        )
+        tools.put(
+            AgentToolSchema.function(
+                name = "terminal_daemon",
+                description = "管理需要跨 Agent 运行保留的后台服务，例如 Web 服务。start 启动并返回 task_id，" +
+                    "list 查看任务，logs 读取日志，stop 停止任务。服务不会随当前运行结束自动回收，" +
+                    "但仍可能因进程退出、系统回收、权限变化或设备重启而终止。",
+                parameters = parameters(
+                    executionProperties()
+                        .put("action", action("start", "list", "logs", "stop"))
+                        .put("command", text("start 要执行的命令，使用实际环境支持的 Shell 语法。"))
+                        .put("task_id", text("start 或 list 返回的任务 ID；logs、stop 使用。")),
+                    "action",
+                ),
+            ),
+        )
     }
 
+    private fun executionProperties(): JSONObject = JSONObject()
+        .put("environment", text("android 使用 Android 命令环境；linux 使用本次运行选定的 Linux 环境。默认 android。")
+            .put("enum", JSONArray(listOf("android", "linux"))))
+        .put("identity", text("可选的宿主执行身份；Android 已确认 Root 授权时默认 root，否则 user。已授权时无需先尝试 user 或重复检测；显式 user 使用 Eta App UID。Linux 内模拟 root 不提供 Android 特权。")
+            .put("enum", JSONArray(listOf("user", "root"))))
+        .put("cwd", text("可选工作目录；省略时使用当前环境默认工作区，相对路径也以默认工作区为基准。"))
+
+    private fun commandProperties(): JSONObject = executionProperties()
+        .put("command", text("要执行的命令，使用实际环境支持的 Shell 语法。"))
+        .put("timeout_ms", integer("命令超时毫秒，默认 30000，最多 180000。超时会终止命令；会话命令超时也会关闭会话。"))
+        .put("merge_stderr", bool("是否把 stderr 合并到 stdout，默认 false。"))
+
+    private fun parameters(properties: JSONObject, vararg required: String): JSONObject = JSONObject()
+        .put("type", "object")
+        .put("properties", properties)
+        .put("required", JSONArray(required.toList()))
+        .put("additionalProperties", false)
+
+    private fun action(vararg values: String): JSONObject = text("要执行的动作。")
+        .put("enum", JSONArray(values.toList()))
+
+    private fun text(description: String) = JSONObject().put("type", "string").put("description", description)
+    private fun bool(description: String) = JSONObject().put("type", "boolean").put("description", description)
+    private fun integer(description: String) = JSONObject().put("type", "integer").put("description", description)
 }

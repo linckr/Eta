@@ -10,12 +10,11 @@ internal object ResponsesRequestBuilder {
         tools: JSONArray,
     ): JSONObject {
         val input = buildInput(messages)
-        val responseTools = buildTools(tools, config.hostedWebSearchEnabled)
+        val responseTools = buildTools(tools, config.usesHostedWebSearch)
         val instructions = OpenAiRequestMessages.responsesInstructions(messages)
             .ifBlank { config.systemPrompt }
         val request = JSONObject()
-        mergeExtraBody(request, config.extraBodyJson)
-        RequestBodyMerge.mergeCustomBody(request, config.customBody)
+        AgentOutputLimit.applyResponsesOptions(request, config)
 
         // 这些字段决定协议正确性、隐私边界和 Eta 本轮行为，必须由运行时最终写入。
         request.put("model", config.model)
@@ -112,6 +111,7 @@ internal object ResponsesRequestBuilder {
         JSONArray().also { result ->
             for (index in 0 until tools.length()) {
                 val function = tools.optJSONObject(index)?.optJSONObject("function") ?: continue
+                if (hostedWebSearchEnabled && function.optString("name") == "web_search") continue
                 result.put(
                     JSONObject()
                         .put("type", "function")
@@ -123,12 +123,6 @@ internal object ResponsesRequestBuilder {
             }
             if (hostedWebSearchEnabled) result.put(JSONObject().put("type", "web_search"))
         }
-
-    private fun mergeExtraBody(request: JSONObject, extraBodyJson: String) {
-        if (extraBodyJson.isBlank()) return
-        val extra = JSONObject(extraBodyJson)
-        extra.keys().forEach { key -> request.put(key, extra.get(key)) }
-    }
 
     private fun deepCopy(value: Any?): Any = when (value) {
         is JSONObject -> JSONObject(value.toString())

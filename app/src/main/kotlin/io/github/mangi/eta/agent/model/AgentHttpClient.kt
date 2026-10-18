@@ -1,6 +1,7 @@
 package io.github.mangi.eta.agent.model
 
 import okhttp3.OkHttpClient
+import okhttp3.ConnectionPool
 import java.util.concurrent.TimeUnit
 
 /**
@@ -20,7 +21,21 @@ internal object AgentHttpClient {
         client.newBuilder()
             .readTimeout(MODEL_READ_TIMEOUT_MS, TimeUnit.MILLISECONDS)
             .retryOnConnectionFailure(false)
+            .eventListenerFactory(ModelHttpTrace.factory)
             .build()
+    }
+
+    private val compactionClient: OkHttpClient by lazy {
+        modelClient.newBuilder()
+            .callTimeout(MODEL_READ_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            .build()
+    }
+
+    fun modelClient(purpose: ProviderRequestPurpose, freshConnection: Boolean = false): OkHttpClient {
+        val shared = if (purpose == ProviderRequestPurpose.COMPACTION) compactionClient else modelClient
+        return if (freshConnection) shared.newBuilder()
+            .connectionPool(ConnectionPool(0, 1, TimeUnit.SECONDS))
+            .build() else shared
     }
 
     val client: OkHttpClient by lazy {

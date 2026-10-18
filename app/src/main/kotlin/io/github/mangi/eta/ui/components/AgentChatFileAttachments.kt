@@ -59,6 +59,7 @@ import top.yukonga.miuix.kmp.squircle.squircleBorder
 import top.yukonga.miuix.kmp.squircle.squircleSurface
 import top.yukonga.miuix.kmp.theme.LocalDismissState
 import top.yukonga.miuix.kmp.theme.MiuixTheme
+import top.yukonga.miuix.kmp.layout.DialogDefaults
 import top.yukonga.miuix.kmp.window.WindowDialog
 import top.yukonga.miuix.kmp.window.WindowListPopup
 
@@ -162,6 +163,7 @@ internal fun AgentAttachmentPickerButton(
 
     WindowDialog(
         show = showPathDialog,
+        cornerRadius = DialogDefaults.CornerRadius,
         title = stringResource(R.string.ui_input_file_path_36d474),
         summary = stringResource(R.string.ui_supports_files_and_folders_under_internal_storage_or_520786),
         onDismissRequest = { showPathDialog = false },
@@ -212,14 +214,14 @@ internal fun PendingFileReferenceStrip(
                     .widthIn(max = 250.dp)
                     .squircleSurface(
                         color = MiuixTheme.colorScheme.surfaceContainerHigh,
-                        cornerRadius = 14.dp,
+                        cornerRadius = 12.dp,
                     )
                     .squircleBorder(
                         width = 0.5.dp,
                         color = MiuixTheme.colorScheme.outline.copy(alpha = 0.5f),
-                        cornerRadius = 14.dp,
+                        cornerRadius = 12.dp,
                     )
-                    .padding(start = 12.dp, end = 6.dp),
+                    .padding(start = 12.dp, end = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
@@ -244,7 +246,7 @@ internal fun PendingFileReferenceStrip(
                 )
                 Box(
                     modifier = Modifier
-                        .size(28.dp)
+                        .size(32.dp)
                         .clip(CircleShape)
                         .clickable { onRemoveReference(pending.id) },
                     contentAlignment = Alignment.Center,

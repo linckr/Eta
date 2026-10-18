@@ -14,14 +14,33 @@ internal sealed interface AgentEvent {
     data class ContextCompaction(
         val operationId: String,
         val phase: String,
-        val tokensBefore: Int,
+        val tokensBefore: Int? = null,
         val tokensAfter: Int? = null,
         val reasonCode: String = "",
+        val completedSlices: Int? = null,
+        val totalSlices: Int? = null,
+        val elapsedMs: Long? = null,
+        val processedPercent: Int? = null,
+        val activity: ContextCompactionActivity? = null,
     ) : AgentEvent {
+        val isRunning: Boolean get() = phase == PHASE_STARTED || phase == PHASE_PROGRESS
+        val progressJson: String? get() = ContextCompactionProgress.encode(completedSlices, totalSlices, elapsedMs, processedPercent, activity)
         val displayMessage: String get() = when (phase) {
-            PHASE_STARTED -> RUNNING_DETAIL
-            PHASE_COMPLETED -> "上下文已压缩：约 ${compactionTokenCount(tokensBefore)} → " +
-                "${compactionTokenCount(tokensAfter ?: 0)} tokens"
+            PHASE_STARTED, PHASE_PROGRESS -> buildString {
+                append(RUNNING_DETAIL)
+                activity?.let { append(' ').append(it.displayMessage) }
+                completedSlices?.takeIf { it >= 0 }?.let { completed ->
+                    append(" 已完成 ").append(completed)
+                    totalSlices?.takeIf { it > 0 && it >= completed }?.let { append('/').append(it) }
+                    append(" 片")
+                }
+                processedPercent?.takeIf { it in 0..100 }?.let { append(" · ").append(it).append('%') }
+                elapsedMs?.takeIf { it >= 0 }?.let {
+                    val seconds = it / 1000
+                    append(" · 已用时 ").append(seconds / 60).append("分").append(seconds % 60).append("秒")
+                }
+            }
+            PHASE_COMPLETED -> "上下文已压缩，用量将在下一次模型响应后更新。"
             else -> "上下文压缩失败，原始上下文已保留。"
         }
         override fun toLogLine(): String =
@@ -29,8 +48,9 @@ internal sealed interface AgentEvent {
 
         companion object {
             const val PHASE_STARTED = "started"
+            const val PHASE_PROGRESS = "progress"
             const val PHASE_COMPLETED = "completed"
-            /** 进行中的展示文案同时是 UI 判定运行态的依据，改动必须与 UI 侧同步。 */
+            /** Legacy running text; phase determines live state. */
             const val RUNNING_DETAIL = "正在压缩上下文…"
         }
     }
@@ -59,9 +79,29 @@ internal sealed interface AgentEvent {
         val maxAttempts: Int,
         val delayMs: Int,
         val reasonCode: String,
+        val diagnosticJson: String? = null,
     ) : AgentEvent {
         val displayMessage: String
-            get() = "模型请求暂时中断，${delayMs / 1000} 秒后重试（$attempt/$maxAttempts）；此前工具结果已保留。"
+            get() {
+                val category = when (reasonCode) {
+                    "MODEL_TIMEOUT" -> "模型请求等待超时"
+                    "MODEL_TLS_FAILED" -> "模型连接安全协商失败"
+                    "MODEL_PROTOCOL_FAILED" -> "模型 HTTP 协议异常"
+                    "MODEL_CONNECTION_FAILED" -> "模型连接暂时中断"
+                    "STREAM_INCOMPLETE" -> "模型响应流未完整结束"
+                    "MODEL_EMPTY_RESPONSE" -> "模型返回空响应"
+                    "CONTEXT_SUMMARY_INVALID" -> "摘要结构校验未通过"
+                    "MODEL_TOOL_PROTOCOL_LEAK" -> "模型工具调用格式异常"
+                    "GATEWAY_REQUEST_BODY_TIMEOUT" -> "网关接收请求超时"
+                    "GATEWAY_REQUEST_BODY_INCOMPLETE" -> "网关未完整收到请求"
+                    "HTTP_429" -> "模型接口暂时限流"
+                    else -> "模型服务暂时不可用"
+                }
+                val purpose = ModelFailureDiagnostic.sanitize(diagnosticJson)
+                    ?.let { runCatching { org.json.JSONObject(it).optString("purpose") }.getOrNull() }
+                val label = if (purpose == "compaction") "上下文压缩：$category" else category
+                return "$label，${delayMs / 1000} 秒后重试（$attempt/$maxAttempts）；此前工具结果已保留。"
+            }
 
         override fun toLogLine(): String =
             "model_retry_scheduled round=$round, attempt=$attempt, delay_ms=$delayMs, code=${reasonCode.toSafeLogToken()}"
@@ -80,6 +120,17 @@ internal sealed interface AgentEvent {
     ) : AgentEvent {
         override fun toLogLine(): String =
             "provider_response_started round=$round, http_code=$httpCode"
+    }
+
+    /** Only the two model identifiers are carried; never attach headers or response bodies. */
+    data class ModelIdentityObserved(
+        val round: Int,
+        val requestedModelId: String,
+        val reportedModelId: String?,
+    ) : AgentEvent {
+        override fun toLogLine(): String =
+            "model_identity_observed round=$round, requested_chars=${requestedModelId.length}, " +
+                "reported_chars=${reportedModelId?.length ?: 0}"
     }
 
     data class AssistantBlockStart(
@@ -141,7 +192,8 @@ internal sealed interface AgentEvent {
 
     data class UserSupplementReceived(
         val index: Int,
-        val text: String
+        val text: String,
+        val requestId: String = "",
     ) : AgentEvent {
         override fun toLogLine(): String =
             "user_supplement_received index=$index, chars=${text.length}"
@@ -213,7 +265,8 @@ internal sealed interface AgentEvent {
     }
 
     data class RunFailed(
-        val reason: String
+        val reason: String,
+        val diagnosticJson: String? = null,
     ) : AgentEvent {
         override fun toLogLine(): String =
             "run_failed reason_chars=${reason.length}"
@@ -222,9 +275,6 @@ internal sealed interface AgentEvent {
 
 private const val MAX_LOGGED_TOOL_NAMES = 8
 private const val RESULT_CODE_MARKER = "code="
-
-private fun compactionTokenCount(value: Int): String =
-    java.text.NumberFormat.getIntegerInstance().format(value)
 
 /** 摘要字段分隔符：旧格式用逗号，人文化摘要用间隔号。 */
 private val RESULT_FIELD_SEPARATORS = listOf(", ", " · ")

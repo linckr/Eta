@@ -12,11 +12,104 @@ import java.util.concurrent.atomic.AtomicReference
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class OpenAiChatCompletionsProviderTest {
+    @Test
+    fun missingToolCallIdsAreUniqueAcrossResponsesAndMatchBlockEvents() {
+        val tool = JSONObject().put("index", 0).put("type", "function")
+            .put("function", JSONObject().put("name", "device_info").put("arguments", "{}"))
+        val body = sseChunk(JSONObject().put("tool_calls", JSONArray().put(tool)), finishReason = "tool_calls") +
+            "data: [DONE]\n\n"
+        withSseServer(body) { baseUrl ->
+            val ids = mutableListOf<String>()
+            repeat(2) {
+                val events = mutableListOf<ProviderEvent>()
+                val response = OpenAiChatCompletionsProvider.complete(providerRequest(baseUrl), AgentRunController(), events::add)
+                val id = response.assistantMessage.getJSONArray("tool_calls").getJSONObject(0).getString("id")
+                assertTrue(id.isNotBlank())
+                assertEquals(id, events.filterIsInstance<ProviderEvent.BlockEnd>().single { event ->
+                    event.kind == AssistantBlockKind.TOOL_CALL
+                }.blockId)
+                ids += id
+            }
+            assertNotEquals(ids[0], ids[1])
+        }
+    }
+
+    @Test
+    fun laterEmptyIdDoesNotOverwriteProviderIdOrSplitArgumentDeltas() {
+        val initial = JSONObject().put("index", 0).put("id", "provider-call-original").put("type", "function")
+            .put("function", JSONObject().put("name", "device_info").put("arguments", "{"))
+        val continuation = JSONObject().put("index", 0).put("id", "")
+            .put("function", JSONObject().put("arguments", "}"))
+        val body = sseChunk(JSONObject().put("tool_calls", JSONArray().put(initial))) +
+            sseChunk(JSONObject().put("tool_calls", JSONArray().put(continuation)), finishReason = "tool_calls") +
+            "data: [DONE]\n\n"
+        withSseServer(body) { baseUrl ->
+            val response = OpenAiChatCompletionsProvider.complete(providerRequest(baseUrl), AgentRunController())
+            val tool = response.assistantMessage.getJSONArray("tool_calls").getJSONObject(0)
+            assertEquals("provider-call-original", tool.getString("id"))
+            assertEquals("device_info", tool.getJSONObject("function").getString("name"))
+            assertEquals("{}", tool.getJSONObject("function").getString("arguments"))
+        }
+    }
+
+    @Test
+    fun acceptsFullMessageSseSnapshots() {
+        val snapshot = JSONObject().put("role", "assistant").put("content", "snapshot answer")
+        withSseServer(sseMessage(snapshot, "stop") + "data: [DONE]\n\n") { baseUrl ->
+            val response = OpenAiChatCompletionsProvider.complete(providerRequest(baseUrl), AgentRunController())
+            assertEquals("snapshot answer", response.assistantMessage.getString("content"))
+        }
+    }
+
+    @Test
+    fun deltaThenCompleteSnapshotDoesNotDuplicateTextOrReasoning() {
+        val body = sseChunk(JSONObject().put("content", "answer").put("reasoning_content", "thinking")) +
+            sseMessage(JSONObject().put("content", "answer finished").put("reasoning_content", "thinking"), "stop") +
+            "data: [DONE]\n\n"
+        withSseServer(body) { baseUrl ->
+            val events = mutableListOf<ProviderEvent>()
+            val response = OpenAiChatCompletionsProvider.complete(providerRequest(baseUrl), AgentRunController(), events::add)
+            assertEquals("answer finished", response.assistantMessage.getString("content"))
+            assertEquals("thinking", response.assistantMessage.getString("reasoning_content"))
+            assertEquals("answer finished", events.filterIsInstance<ProviderEvent.BlockDelta>()
+                .filter { it.kind == AssistantBlockKind.TEXT }.joinToString("") { it.delta })
+        }
+    }
+
+    @Test
+    fun deltaThenToolSnapshotDoesNotDuplicateFunctionOrArguments() {
+        val call = JSONObject().put("index", 0).put("id", "snapshot-tool").put("type", "function")
+            .put("function", JSONObject().put("name", "probe").put("arguments", "{\"value\":1}"))
+        val body = sseChunk(JSONObject().put("tool_calls", JSONArray().put(call))) +
+            sseMessage(JSONObject().put("role", "assistant").put("content", JSONObject.NULL)
+                .put("tool_calls", JSONArray().put(call)), "tool_calls") + "data: [DONE]\n\n"
+        withSseServer(body) { baseUrl ->
+            val response = OpenAiChatCompletionsProvider.complete(providerRequest(baseUrl), AgentRunController())
+            val calls = response.assistantMessage.getJSONArray("tool_calls")
+            assertEquals(1, calls.length())
+            assertEquals("probe", calls.getJSONObject(0).getJSONObject("function").getString("name"))
+            assertEquals("{\"value\":1}", calls.getJSONObject(0).getJSONObject("function").getString("arguments"))
+        }
+    }
+
+    @Test
+    fun conflictingSnapshotIsRejectedBeforeAnyToolCanExecute() {
+        val body = sseChunk(JSONObject().put("content", "first")) +
+            sseMessage(JSONObject().put("content", "different"), "stop") + "data: [DONE]\n\n"
+        withSseServer(body) { baseUrl ->
+            val failure = org.junit.Assert.assertThrows(AgentModelFailure::class.java) {
+                OpenAiChatCompletionsProvider.complete(providerRequest(baseUrl), AgentRunController())
+            }
+            assertEquals("MODEL_SNAPSHOT_CONFLICT", failure.code)
+        }
+    }
+
     @Test
     fun thinkingStreamsBeforeDoneAndClosesBeforeTheUsageTail() {
         val firstDelta = CountDownLatch(1)
@@ -498,6 +591,10 @@ class OpenAiChatCompletionsProviderTest {
             .put("finish_reason", finishReason ?: JSONObject.NULL)
         return "data: ${JSONObject().put("choices", JSONArray().put(choice))}\n\n"
     }
+
+    private fun sseMessage(message: JSONObject, finishReason: String): String =
+        "data: ${JSONObject().put("choices", JSONArray().put(JSONObject()
+            .put("message", message).put("finish_reason", finishReason)))}\n\n"
 
     private fun usageChunk(usage: JSONObject): String =
         "data: ${JSONObject().put("choices", JSONArray()).put("usage", usage)}\n\n"

@@ -166,6 +166,9 @@ internal object BreenoHooks {
         val hooks = HookRegistrar(module, rootLogger, "Breeno")
         val logger = hooks.logger
         return hooks.install {
+            if (module.moduleApplicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0) {
+                BreenoAsrProbe.install(hooks, classLoader, File(applicationInfo.dataDir, "cache"))
+            }
             val targets = DexKitTargets(
                 apkPath = applicationInfo.sourceDir,
                 classLoader = classLoader,
@@ -173,7 +176,10 @@ internal object BreenoHooks {
                 cacheDirectory = File(applicationInfo.dataDir, "cache/eta-dexkit"),
                 moduleNativeLibraryDirectory = module.moduleApplicationInfo.nativeLibraryDir,
                 moduleApkPath = module.moduleApplicationInfo.sourceDir,
-            ).use { BreenoTargets.resolve(classLoader, it) }
+            ).use {
+                BreenoAsrHooks.install(hooks, classLoader, it) { currentRoomId(classLoader) }
+                BreenoTargets.resolve(classLoader, it)
+            }
             protocolTargets = targets
             if (targets.missingBridgeMethods.isNotEmpty()) {
                 missing(
@@ -353,6 +359,8 @@ internal object BreenoHooks {
             .orEmpty()
             .ifBlank { currentRoomId(classLoader) }
         val recordId = invokeString(bean, "getRecordId").orEmpty()
+        if (BreenoAsrHooks.suppressRuntime(logger, roomId, recordId, recordId)) return
+        if (BreenoAsrProbe.suppressRuntime(logger, roomId, recordId, recordId, "aichat")) return
         val clientResult = HookSupport.invokeNoArgs(bean, "getClientResult")
         if (BreenoRequestImages.isMultiImageClientResult(clientResult)) {
             cachePendingClientImages(
@@ -512,6 +520,10 @@ internal object BreenoHooks {
         message: Any?
     ): Boolean {
         val extractedRequest = extractTextRequest(classLoader, message) ?: return false
+        if (BreenoAsrHooks.suppressRuntime(logger, extractedRequest.roomId, extractedRequest.recordId,
+                extractedRequest.originalRecordId)) return true
+        if (BreenoAsrProbe.suppressRuntime(logger, extractedRequest.roomId, extractedRequest.recordId,
+                extractedRequest.originalRecordId, "text")) return true
         val request = extractedRequest.copy(
             history = currentBreenoHistory(
                 classLoader = classLoader,

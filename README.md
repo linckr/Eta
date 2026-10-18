@@ -2,7 +2,7 @@
 
 **简体中文** | [English](README_EN.md)
 
-<p><a href="https://github.com/Mangi-11/Eta/releases"><img src="https://img.shields.io/github/downloads/Mangi-11/Eta/total?logo=github&amp;label=%E4%B8%8B%E8%BD%BD%E9%87%8F&amp;color=1677FF" alt="GitHub Releases 累计下载量"></a> <img src="https://img.shields.io/badge/minSdk-34-3DDC84?logo=android&amp;logoColor=white" alt="minSdk 34"> <img src="https://img.shields.io/badge/Kotlin-2.4.10-7F52FF?logo=kotlin&amp;logoColor=white" alt="Kotlin 2.4.10"> <img src="https://img.shields.io/badge/AGP-9.3.2-3DDC84?logo=android&amp;logoColor=white" alt="AGP 9.3.2"> <img src="https://img.shields.io/badge/Assistant%20Integrations-ColorOS%20%26%20HyperOS-1677FF" alt="Assistant integrations for ColorOS and HyperOS"></p>
+ <p><a href="https://github.com/Mangi-11/Eta/releases"><img src="https://img.shields.io/github/downloads/Mangi-11/Eta/total?logo=github&amp;label=Downloads&amp;color=1677FF" alt="GitHub Releases 累计下载量"></a> <img src="https://img.shields.io/badge/minSdk-33-3DDC84?logo=android&amp;logoColor=white" alt="minSdk 33"> <img src="https://img.shields.io/badge/Kotlin-2.4.20-7F52FF?logo=kotlin&amp;logoColor=white" alt="Kotlin 2.4.20"> <img src="https://img.shields.io/badge/AGP-9.4.1-3DDC84?logo=android&amp;logoColor=white" alt="AGP 9.4.1"> <img src="https://img.shields.io/badge/Assistant%20Integrations-ColorOS%20%26%20HyperOS-1677FF" alt="Assistant integrations for ColorOS and HyperOS"></p>
 
 **面向 Android 的第三方系统级 AI 助手**
 
@@ -16,7 +16,7 @@ Eta 是为手机和移动设备设计的 AI Agent，结合了 [Codex](https://op
 
 Eta 内置 Agent Runtime，通过 Agent Loop 编排模型调用、工具执行和结果反馈，并支持 Skills 与 MCP 扩展。使用 AI 功能需要自备模型服务的 **API Key（BYOK）**，模型与服务商由你选择。
 
-支持 **Android 14 及以上版本**，App 本体不限手机品牌，基础功能无需 Root。Root 和 LSPosed 可进一步扩展系统访问与助手入口，具体能力取决于授权和 ROM 适配。
+支持 **Android 13 及以上版本**，App 本体不限手机品牌，基础功能无需 Root。Root 和 LSPosed 可进一步扩展系统访问与助手入口，具体能力取决于授权和 ROM 适配。
 
 [下载 APK](https://github.com/Mangi-11/Eta/releases) · [快速开始](#快速开始) · [为什么做 Eta](#为什么做-eta)
 
@@ -41,10 +41,11 @@ Eta 内置 Agent Runtime，通过 Agent Loop 编排模型调用、工具执行�
 
 ### 执行工具
 
-- **系统 API 调用**：通过 Android API 与系统 Intent 设置闹钟、控制媒体、调整音量、读取设备状态，无需逐步操作界面。
-- **GUI Agent**：结合无障碍 UI 树、控件定位与按需截图，执行点击、滚动和输入；截图按原始尺寸与像素传递，不在上传前缩放或转 JPEG。通过浮层展示执行状态，支持停止和接管。
+- **系统 API 与设备工具**：通过 Android API 与系统 Intent 设置闹钟、控制媒体、调整音量、读取设备状态；也可查询应用版本、安装信息与权限，在 Root 授权下筛选系统日志。设置、应用状态和音量操作会读回结果，未确认时明确报告。
+- **GUI Agent**：结合无障碍 UI 树、控件定位与按需截图，执行点击、滚动和输入；截图按原始尺寸与像素传递，不在上传前缩放或转 JPEG。执行时屏幕边缘流光提示正在接管，状态栏下方的状态胶囊显示当前步骤，点击展开补充、暂停与停止；Android 16 QPR2 及以上的设备还会把运行状态显示到状态栏胶囊与锁屏（Live Updates，部分系统映射到流体云等）。
 - **内置浏览器**：通过 WebView 加载 JavaScript 页面、读取正文、操作 DOM 与截图；用户可打开同一浏览器会话接管。
-- **终端与文件**：Android user/root Shell、Alpine / Debian Linux、文件读写与脚本执行，支持会话、异步命令和守护任务。
+- **终端**：Android user/root Shell、Alpine / Debian Linux 与脚本执行，支持会话、异步命令和守护任务；返回实际 Shell、执行身份与可解析命令的信息。
+- **文件工具**：读取、写入、精确编辑、元数据查询、目录分页、路径匹配与文本搜索。文本读取按 UTF-8 字节边界续读，编辑检查旧内容，搜索结果说明实际范围与未完成部分。
 
 同一项任务可以组合多种工具：例如先读取网页资料，再用脚本整理文件；或从通知中找到订单线索，再打开应用确认状态。
 
@@ -57,7 +58,7 @@ Eta 内置 Agent Runtime，通过 Agent Loop 编排模型调用、工具执行�
 
 ### Agent Runtime
 
-Agent Runtime 运行在 Eta App 内，来自聊天页面和系统助手的请求共用同一个 Agent Loop。模型通过 Tool Calling 选择工具，执行结果回到上下文，再决定下一步。工具调用按 JSON Schema 校验，并在执行前检查权限；Hook 进程只负责入口与结果回传。
+Agent Runtime 运行在 Eta App 内，来自聊天页面和系统助手的请求共用同一个 Agent Loop。模型通过 Tool Calling 选择工具，执行结果回到上下文，再决定下一步。工具 Schema 用于向模型说明参数，调用交给对应执行器处理，并在执行前检查权限；Hook 进程只负责入口与结果回传。
 
 Runtime 同时管理流式事件、steering、取消和增量 transcript。追加指令在当前 turn 完成后进入下一轮，会话与结果在本机归档；中断后尝试恢复已有记录，不自动重放操作。详细设计见 [Agent Runtime](docs/AGENT_RUNTIME.md)。
 
@@ -67,11 +68,13 @@ Runtime 同时管理流式事件、steering、取消和增量 transcript。追�
 
 ## 为移动设备重新设计的终端
 
-Eta 的终端可以由 Agent 调用，也可以由你直接操作。多个会话各自保留工作目录与环境；简洁模式按命令展示输入输出，PTY 控制台支持 TUI、快捷键与 ANSI 渲染。异步命令和守护任务都可以查看日志、主动停止。
+Eta 的终端可以由 Agent 调用，也可以由你直接操作。多个会话各自保留工作目录与环境；PTY 控制台是默认形态，可以直接运行 Claude Code、Codex、Kimi Code 等 TUI：输入直达终端，键条提供 Esc、Ctrl/Alt、方向键、回车与粘贴，网格随软键盘自动调整；简洁模式按命令展示输入输出。模型通过 `terminal` 执行命令，`terminal_job` 管理回复结束后仍会继续执行的后台命令，完成时发送通知并保留日志，`terminal_daemon` 管理可跨任务运行的后台服务；两种后台任务都可查看输出、主动停止。
+
+Agent 的文件与命令共用本次运行的默认身份和工作区：已确认 Root 授权时默认直接使用 Root，否则使用 App 身份；两者使用同一个私有工作区，身份变化不移动文件。工作区页面支持读取、导出 Root 生成的文件；需要普通身份时显式传 identity=user。普通 Shell 身份不等同于 ADB Shell。Linux 文件路径在所选环境内部解析，例如 `/workspace`，不使用 Android 宿主的 rootfs 路径。单次写入及精确编辑限制为 512 KiB；续读、分页、版本检查与不同后端的写入保证见 [文件工具合同](docs/AGENT_RUNTIME.md#结构化文件工具)。
 
 - **Linux 环境**：可选 Alpine 或 Debian，普通设备使用 PRoot，Root 设备还可选择 chroot。两种后端独立安装，不自动迁移数据；PRoot 中的模拟 root 不提供 Android 系统权限。
 - **开发工具**：Python、Node.js、SSH、APK 分析与 Kimi Code 按需安装。
-- **文件管理**：私有工作区支持导入、导出；已授权的 Android 目录可共享到 Linux 的 `/workspace/mounts/`，也可在 App 内浏览 Linux 文件。
+- **文件管理**：私有工作区支持导入、导出；已授权的 Android 目录可共享到 Linux 的 `/workspace/mounts/`，也可在 App 内浏览 Linux 文件。通过选择器导入的文件是工作区副本，修改副本不会自动写回来源；文件工具只接受文件系统路径，不直接写回 `content://` 文档。
 
 Eta 本体可以读取项目、修改代码、运行命令并验证结果。如果想在手机上持续进行编程工作，[Kimi Code](https://github.com/MoonshotAI/kimi-code) 的 **Kimi Web** 提供了更适合移动端的 Web UI，可以在浏览器中持续对话、查看代码修改与执行结果，享受完整的 Coding Agent 工作体验，随时随地 Vibe Coding。
 
@@ -81,14 +84,20 @@ Eta 本体可以读取项目、修改代码、运行命令并验证结果。如�
 
 使用 Eta 的 AI 功能需要自备模型服务的 **API Key**。内置 OpenAI、Anthropic、阿里百炼、DeepSeek、Kimi、MiMo、MiniMax、StepFun、硅基流动和 OpenRouter 等提供商配置，也可添加自定义服务。
 
-Provider 层支持 OpenAI-compatible Chat Completions、Responses API 和 Anthropic Messages，包括 SSE、Tool Calling、图片输入与推理内容。你可以自定义服务地址、请求头和请求体，拉取或手动添加模型，调整上下文长度与思考档位。具体能力取决于模型与接口，部分 Responses 提供商还可开启服务端网页搜索。
+内置提供商附带常用对话模型预设；目录更新会为已有内置配置补充新型号，并保留用户的模型设置和当前选择。硅基流动与 OpenRouter 的模型目录变化较快，可在提供商的「模型」页面从服务端拉取。
+
+提供商列表还可从 [models.dev](https://models.dev/) 社区目录挑选兼容的对话服务和模型；联网时更新目录，离线时使用本地缓存或随应用打包的快照。导入后的提供商默认停用，需核对服务地址、填写该服务的 API Key 并启用；Eta 读取目录时不发送已保存的 API Key。
+
+Provider 层支持 OpenAI-compatible Chat Completions、Responses API 和 Anthropic Messages，包括 SSE、Tool Calling、图片输入与推理内容。你可以自定义服务地址、请求头和请求体，拉取或手动添加模型（拉取后从尚未添加的模型中勾选需要的加入），调整上下文长度与思考档位。具体能力取决于模型与接口，部分 Responses 提供商还可开启服务端网页搜索。
+
+在设置中的模型提供商填写模型的上下文窗口大小（tokens）后才会启用自动压缩，从远端拉取时接口标注了窗口的模型会自动填好；未填写时照常对话，可手动压缩。“设置 → 上下文与扩展 → 自动压缩上下文”默认开启，修改从下一次运行生效，关闭后仍可手动压缩。自动压缩按服务商实际返回的输入用量与该窗口判断，不自动补窗或估算请求 token 数；服务商未返回输入用量时，可手动压缩。
 
 提供商配置中的“自定义请求头”默认折叠，可添加、编辑和删除名称/值，保存后用于模型列表与对话请求；“测试连接”会使用尚未保存的配置。支持覆盖 `User-Agent`，认证和传输请求头仍由 Eta 管理。连接 OpenCode 官方端点时，Eta 自动发送每段对话稳定的 `x-opencode-session`，无需手动填写；默认客户端标识为 `Eta`。
 
 ## 系统助手入口
 
 - **长按电源键**：选择唤起系统默认助手、Gemini 或 Eta。
-- **Eta 系统助手**：从电源键入口打开全局语音浮窗，竖屏下光效从按键位置沿屏幕边缘进入并汇聚到底部，也可切换键盘或点击建议提问；自动附带唤醒时的截图与应用内容，无需额外点击或开启无障碍截图。语音转写依赖设备可用的识别服务与麦克风权限；服务支持查询时可提示缺少的语音包，并由用户选择下载。
+- **Eta 系统助手**：从电源键入口打开全局语音浮窗，竖屏下光效从按键位置沿屏幕边缘进入并汇聚到底部，也可切换键盘或点击建议提问；自动附带唤醒时的截图与应用内容，无需额外点击或开启无障碍截图。语音识别可选择系统服务、千问或豆包；云端模式只需麦克风权限与对应服务配置，不依赖设备自带识别服务。支持助手回答自动播报、聊天听写和手动朗读，详见[语音配置](docs/VOICE.md)。
 - **小布 / 超级小爱接管**：保留厂商助手的电源键入口，将请求交给 Eta，使用自己配置的模型。
 
 电源键接管需要 LSPosed 与对应系统支持。
@@ -106,16 +115,17 @@ Provider 层支持 OpenAI-compatible Chat Completions、Responses API 和 Anthro
 
 - **数据去向**：任务所需的对话、图片和工具结果会发送给配置的模型服务；本地 Runtime 不代表本地推理。自定义 HTTP 地址会明文传输 API Key 与请求内容。
 - **本机记录**：敏感工具及 MCP 的原始参数、结果不写入持久会话，模型回复仍会保存。通知历史在授权后保存最近 7 天、最多 1000 条；MCP 认证令牌加密保存。
+- **会话模型**：每个对话记住上次使用的模型，切回对话即恢复；在对话中切换模型同时更新默认模型，新对话与系统助手入口使用默认模型。原模型被停用或删除时临时改用默认模型并提示，重新启用后自动恢复。
 - **会话与备份**：支持消息复制、编辑、从某轮删除和回复重新生成；单个对话可导出为 Markdown，也可整体导入导出对话、模型配置、角色资料与记忆；备份包含 API Key。分享角色卡只导出角色设定和卡片图片，不包含私人对话与记忆。
 - **运行边界**：任务可停止或接管。后台运行受 Android 与厂商进程管理影响，强停或重启后需手动启动；系统与应用更新也可能需要重新适配 Hook。
 
 ## 快速开始
 
-1. 从 [Releases](https://github.com/Mangi-11/Eta/releases) 下载 APK，安装后在“模型提供商”中填写 API Key 并选择模型。执行任务需要 Tool Calling，理解图片还需模型支持图片输入。
+1. 从 [Releases](https://github.com/Mangi-11/Eta/releases) 下载 APK，安装后在“模型提供商”中填写 API Key 并选择默认模型。执行任务需要 Tool Calling，理解图片还需模型支持图片输入。
 2. 按任务需要配置工具开关与权限：GUI Agent 需要无障碍服务；通知、应用使用情况分别授权；位置工具需要“始终允许”。工具页可查看当前设备的可用能力。
 3. 开始对话。需要 Linux 时，在“Linux 工具环境”中安装发行版、基础工具及所需开发工具；需要系统入口时，参见[系统助手入口](#系统助手入口)。
 
-- **普通设备**：Android 14+，可使用聊天、浏览器、记忆、Skills、MCP、普通终端与私有工作区；GUI 和本机信息读取按需授权。Linux 支持对应的 64 位设备。
+- **普通设备**：Android 13+，可使用聊天、浏览器、记忆、Skills、MCP、普通终端与私有工作区；GUI 和本机信息读取按需授权。Linux 支持对应的 64 位设备。
 - **Root 设备**：进一步开放系统设置修改、应用管理、受保护文件与专用个人数据检索，以及 Root Shell 和 chroot。
 - **LSPosed 与适配 ROM**：开放厂商助手接管、系统快捷入口及 Google 能力增强；部分功能另需 Root。
 

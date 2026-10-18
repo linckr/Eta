@@ -1,5 +1,6 @@
 package io.github.mangi.eta.ui
 
+import io.github.mangi.eta.ui.voice.ACTION_SPEECH_SETTINGS
 import android.app.UiModeManager
 import android.content.Intent
 import android.os.Bundle
@@ -18,6 +19,7 @@ import io.github.mangi.eta.agent.voice.EtaAssistantOverlayService
 import io.github.mangi.eta.data.model.AppearanceThemeMode
 import io.github.mangi.eta.data.repository.AppearanceSettingsRepository
 import io.github.mangi.eta.ui.app.AgentAppRoot
+import io.github.mangi.eta.ui.app.ArchivedConversationRequest
 import io.github.mangi.eta.ui.app.AgentAppTheme
 import io.github.mangi.eta.ui.app.PredictiveBackController
 import io.github.mangi.eta.ui.app.installStartupSplash
@@ -25,7 +27,11 @@ import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     private var assistantConversationKey by mutableStateOf<String?>(null)
+    private var requestedConversationId by mutableStateOf<String?>(null)
+    private var requestedArchivedConversation by mutableStateOf<ArchivedConversationRequest?>(null)
     private var appliedPredictiveBackEnabled = true
+    private var speechSettingsRequested by mutableStateOf(false)
+    private var terminalRequested by mutableStateOf(false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -61,6 +67,14 @@ class MainActivity : ComponentActivity() {
                 ) {
                     AgentAppRoot(
                         assistantConversationKey = assistantConversationKey,
+                        requestedConversationId = requestedConversationId,
+                        onRequestedConversationOpened = { requestedConversationId = null; intent?.action = null },
+                        requestedArchivedConversation = requestedArchivedConversation,
+                        onArchivedConversationOpened = { requestedArchivedConversation = null; intent?.action = null },
+                        openSpeechSettings = speechSettingsRequested,
+                        openTerminal = terminalRequested,
+                        onTerminalOpened = { terminalRequested = false; intent?.action = null },
+                        onSpeechSettingsOpened = { speechSettingsRequested = false; intent?.action = null },
                         onAssistantConversationOpened = { opened ->
                             assistantConversationKey = null
                             if (opened) {
@@ -81,6 +95,28 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun updateAssistantHandoff(intent: Intent?) {
+        if (intent?.action == ACTION_OPEN_TERMINAL) {
+            terminalRequested = true
+            return
+        }
+        if (intent?.action == ACTION_SPEECH_SETTINGS) {
+            speechSettingsRequested = true
+            return
+        }
+        if (intent?.action == ACTION_OPEN_CONVERSATION_ID) {
+            requestedConversationId = intent.getStringExtra(EXTRA_CONVERSATION_ID)?.takeIf(String::isNotBlank)
+            return
+        }
+        if (intent?.action == ACTION_OPEN_ARCHIVED_CONVERSATION) {
+            val source = intent.getStringExtra(EXTRA_HANDOFF_SOURCE)?.takeIf(String::isNotBlank)
+            val key = intent.getStringExtra(EXTRA_CONVERSATION_KEY)?.takeIf(String::isNotBlank)
+            requestedArchivedConversation = if (source != null && key != null) {
+                ArchivedConversationRequest(source, key)
+            } else {
+                null
+            }
+            return
+        }
         if (intent?.action != EtaAssistantOverlayService.ACTION_OPEN_CONVERSATION) return
         assistantConversationKey = intent.getStringExtra(
             EtaAssistantOverlayService.EXTRA_CONVERSATION_KEY,
@@ -124,5 +160,16 @@ class MainActivity : ComponentActivity() {
         overridePendingTransition(0, 0)
         recreate()
         overridePendingTransition(0, 0)
+    }
+
+    companion object {
+        const val ACTION_OPEN_TERMINAL = "io.github.mangi.eta.action.OPEN_TERMINAL"
+        /** 运行浮层的结果卡片回到本体：App 发起的 run 带会话 ID，直接打开该会话。 */
+        const val ACTION_OPEN_CONVERSATION_ID = "io.github.mangi.eta.action.OPEN_CONVERSATION_ID"
+        const val EXTRA_CONVERSATION_ID = "io.github.mangi.eta.extra.CONVERSATION_ID"
+        /** 系统助手等外部入口发起的 run 按来源与会话键归档，回到本体时打开对应的归档会话。 */
+        const val ACTION_OPEN_ARCHIVED_CONVERSATION = "io.github.mangi.eta.action.OPEN_ARCHIVED_CONVERSATION"
+        const val EXTRA_HANDOFF_SOURCE = "io.github.mangi.eta.extra.HANDOFF_SOURCE"
+        const val EXTRA_CONVERSATION_KEY = "io.github.mangi.eta.extra.CONVERSATION_KEY"
     }
 }

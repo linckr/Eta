@@ -33,7 +33,7 @@ internal enum class EndpointKind {
 }
 
 internal enum class ProviderRequestPurpose {
-    CHAT, COMPACTION, REPLY_REWRITE;
+    CHAT, COMPACTION, REPLY_REWRITE, TRANSCRIPT_REFINE;
 
     val allowsTools: Boolean get() = this == CHAT
 }
@@ -44,6 +44,8 @@ internal data class ProviderRequest(
     val tools: JSONArray,
     val sessionId: String = java.util.UUID.randomUUID().toString(),
     val purpose: ProviderRequestPurpose = ProviderRequestPurpose.CHAT,
+    val freshConnection: Boolean = false,
+    val onTransportPhase: ((String) -> Unit)? = null,
 ) {
     val effectiveConfig: AgentModelClient.ModelConfig get() = if (!purpose.allowsTools) {
         config.copy(hostedWebSearchEnabled = false, extraBodyJson = "", customBody = emptyList())
@@ -52,7 +54,9 @@ internal data class ProviderRequest(
 }
 
 internal data class ProviderResponse(
-    val assistantMessage: JSONObject
+    val assistantMessage: JSONObject,
+    /** Runtime-only metadata; never serialized into the model's protocol history. */
+    val httpTrace: ModelHttpTrace? = null,
 ) {
     val stopReason: AssistantStopReason
         get() = AssistantStopReason.fromWireValue(assistantMessage.optString("finish_reason"))
@@ -114,9 +118,7 @@ internal sealed interface ProviderEvent {
 
     data class Usage(
         val usage: AgentTokenUsage,
-        val contextInputTokens: Int? = usage.inputTokens ?: usage.contextTokens?.let {
-            (it - (usage.outputTokens ?: 0)).coerceAtLeast(0)
-        },
+        val contextInputTokens: Int? = usage.inputTokens,
     ) : ProviderEvent
 
     data class HostedToolStarted(

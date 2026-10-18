@@ -8,4 +8,6 @@ data class Settings(
     val selectedModelId: String? = null,
     val memoryEnabled: Boolean = true,
     val appearance: AppearanceSettings = AppearanceSettings(),
+    /** Null follows each conversation's model; a value is an explicitly chosen model row ID. */
+    val compactionModelId: String? = null,
 )

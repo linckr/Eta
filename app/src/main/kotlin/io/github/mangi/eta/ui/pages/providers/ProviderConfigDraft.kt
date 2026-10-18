@@ -9,6 +9,7 @@ import io.github.mangi.eta.data.model.CustomProviderSetting
 import io.github.mangi.eta.data.model.OpenAiCompatibleProviderSetting
 import io.github.mangi.eta.data.model.ProviderSetting
 import java.util.UUID
+import java.math.BigDecimal
 
 internal data class ProviderHeaderDraft(
     val id: String = UUID.randomUUID().toString(),
@@ -25,6 +26,7 @@ internal data class ProviderConfigDraft(
     val hostedWebSearchEnabled: Boolean,
     val anthropicVersion: String,
     val headers: List<ProviderHeaderDraft> = emptyList(),
+    val requestByteBudgetKiB: String = "",
 ) {
     companion object {
         fun from(provider: ProviderSetting): ProviderConfigDraft = ProviderConfigDraft(
@@ -32,6 +34,7 @@ internal data class ProviderConfigDraft(
             name = provider.name,
             baseUrl = provider.baseUrl,
             apiKey = provider.apiKey,
+            requestByteBudgetKiB = requestByteBudgetKiBText(provider.requestByteBudget),
             systemPrompt = provider.systemPrompt.orEmpty(),
             isEnabled = provider.isEnabled,
             endpointMode = when (provider) {
@@ -58,6 +61,7 @@ internal val ProviderConfigDraftSaver = mapSaver(
             "endpointMode" to draft.endpointMode,
             "hostedWebSearchEnabled" to draft.hostedWebSearchEnabled,
             "anthropicVersion" to draft.anthropicVersion,
+            "requestByteBudgetKiB" to draft.requestByteBudgetKiB,
         )
     },
     restore = { state ->
@@ -73,6 +77,7 @@ internal val ProviderConfigDraftSaver = mapSaver(
             endpointMode = state.getValue("endpointMode") as String,
             hostedWebSearchEnabled = state.getValue("hostedWebSearchEnabled") as Boolean,
             anthropicVersion = state.getValue("anthropicVersion") as String,
+            requestByteBudgetKiB = state["requestByteBudgetKiB"] as? String ?: "",
         )
     },
 )
@@ -88,7 +93,9 @@ internal fun buildUpdatedProvider(
     hostedWebSearchEnabled: Boolean,
     anthropicVersion: String,
     customHeaders: List<CustomHeader>,
+    requestByteBudget: Int? = source.requestByteBudget,
 ): ProviderSetting {
+    require(requestByteBudget == null || requestByteBudget >= 0) { "Invalid request byte budget" }
     val prompt = systemPrompt.trim().takeIf { it.isNotBlank() }
     return when (source) {
         is OpenAiCompatibleProviderSetting -> source.copy(
@@ -100,6 +107,7 @@ internal fun buildUpdatedProvider(
             isEnabled = isEnabled,
             endpointMode = endpointMode,
             hostedWebSearchEnabled = hostedWebSearchEnabled,
+            requestByteBudget = requestByteBudget,
         )
         is CustomProviderSetting -> source.copy(
             customHeaders = customHeaders.map { it.copy(name = it.name.trim()) },
@@ -110,6 +118,7 @@ internal fun buildUpdatedProvider(
             isEnabled = isEnabled,
             endpointMode = endpointMode,
             hostedWebSearchEnabled = hostedWebSearchEnabled,
+            requestByteBudget = requestByteBudget,
         )
         is AnthropicProviderSetting -> source.copy(
             customHeaders = customHeaders.map { it.copy(name = it.name.trim()) },
@@ -119,15 +128,34 @@ internal fun buildUpdatedProvider(
             systemPrompt = prompt,
             isEnabled = isEnabled,
             anthropicVersion = anthropicVersion.trim().ifBlank { AnthropicProviderSetting.DEFAULT_ANTHROPIC_VERSION },
+            requestByteBudget = requestByteBudget,
         )
     }
 }
 
 internal fun validateProviderDraft(context: android.content.Context, draft: ProviderConfigDraft): String? {
     if (draft.name.isBlank()) return context.getString(R.string.page_name_cannot_be_empty_ca8984)
+    if (requestByteBudgetInputError(draft.requestByteBudgetKiB)) {
+        return context.getString(R.string.provider_request_byte_budget_error)
+    }
     val uri = runCatching { java.net.URI(draft.baseUrl.trim()) }.getOrNull()
     if (uri == null || uri.scheme !in setOf("http", "https") || uri.host.isNullOrBlank()) {
         return context.getString(R.string.page_base_url_must_be_a_valid_http_s_address_0e7d58)
     }
     return CustomHeaderFilter.validationError(draft.headers.map { it.header })
 }
+
+/** Exact KiB display preserves byte-level values restored from older/custom profiles. */
+internal fun requestByteBudgetKiBText(bytes: Int?): String = bytes?.let {
+    BigDecimal(it).divide(BigDecimal(1024)).stripTrailingZeros().toPlainString()
+}.orEmpty()
+
+internal fun requestByteBudgetFromKiB(text: String): Int? {
+    val value = text.trim()
+    if (value.isEmpty()) return null
+    require(value.length <= 32 && value.matches(Regex("(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+)")))
+    return BigDecimal(value).multiply(BigDecimal(1024)).intValueExact().also { require(it >= 0) }
+}
+
+internal fun requestByteBudgetInputError(text: String): Boolean =
+    runCatching { requestByteBudgetFromKiB(text) }.isFailure

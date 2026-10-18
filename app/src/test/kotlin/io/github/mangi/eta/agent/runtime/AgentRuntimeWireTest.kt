@@ -25,8 +25,159 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [36])
+@Config(sdk = [33, 36])
 class AgentRuntimeWireTest {
+    @Test
+    fun compactionProgressSurvivesIpcAndArchiveAndLegacyFieldsStayOptional() {
+        val event = AgentEvent.ContextCompaction("same-operation", AgentEvent.ContextCompaction.PHASE_PROGRESS,
+            completedSlices = 13, totalSlices = 20, elapsedMs = 1_500_000L, processedPercent = 65,
+            activity = ContextCompactionActivity("thinking", 14, 12_000, 0, 1234, 1))
+        val bundle = AgentRuntimeWire.eventToBundle(event)
+        assertEquals("started", bundle.getString("phase")) // old reader stays running, never failed
+        assertEquals(event, AgentRuntimeWire.eventFromBundle(bundle))
+        val archived = AgentEventJsonCodec.encode(event)
+        assertEquals("progress", org.json.JSONObject(archived).getString("phase"))
+        assertEquals(event, AgentEventJsonCodec.decode(archived))
+        assertTrue(event.isRunning)
+        val bareProgress = AgentEvent.ContextCompaction("same-operation", AgentEvent.ContextCompaction.PHASE_PROGRESS)
+        assertEquals(bareProgress, AgentRuntimeWire.eventFromBundle(AgentRuntimeWire.eventToBundle(bareProgress)))
+        assertTrue(event.displayMessage.contains("13/20 片"))
+        assertTrue(event.displayMessage.contains("25分0秒"))
+        val legacy = AgentEventJsonCodec.decode("""{"type":"context_compaction","operation_id":"old","phase":"started"}""") as AgentEvent.ContextCompaction
+        assertNull(legacy.completedSlices)
+        assertNull(legacy.elapsedMs)
+        assertTrue(legacy.isRunning)
+        assertEquals(AgentEvent.ContextCompaction.RUNNING_DETAIL, legacy.displayMessage)
+        val invalid = AgentRuntimeWire.eventToBundle(event).apply {
+            putInt("completed_slices", -1); putInt("total_slices", 0)
+            putLong("elapsed_ms", -1L); putInt("processed_percent", 101)
+        }
+        val safe = AgentRuntimeWire.eventFromBundle(invalid) as AgentEvent.ContextCompaction
+        assertNull(safe.completedSlices); assertNull(safe.totalSlices)
+        assertNull(safe.elapsedMs); assertNull(safe.processedPercent)
+    }
+
+    @Test
+    fun separateCompactionConfigSurvivesLegacyWireWithCodexSecretRemoved() {
+        val child = AgentModelClient.ModelConfig(baseUrl = "https://example.invalid", apiKey = "secret-fixture", model = "summary", systemPrompt = "summary prompt", authMode = io.github.mangi.eta.agent.model.CodexCompatibilityProfile.AUTH_MODE)
+        val config = child.copy(authMode = io.github.mangi.eta.agent.model.CodexCompatibilityProfile.API_KEY_AUTH_MODE, model = "chat", compactionModelId = "chosen", compactionModelConfig = child)
+        val request = AgentRuntimeWire.RunRequest(runId = "summary-config", prompt = "fixture", config = config, images = emptyList())
+        val result = AgentRuntimeWire.runRequestFromBundle(AgentRuntimeWire.toLegacyBundle(request)).config
+        assertEquals("chat", result.model)
+        assertEquals("chosen", result.compactionModelId)
+        assertEquals("summary", result.compactionModelConfig?.model)
+        assertEquals("", result.compactionModelConfig?.apiKey)
+        assertNull(result.compactionModelConfig?.compactionModelConfig)
+    }
+    @Test
+    fun uploadBudgetDisableSurvivesWireAndLegacyJsonUsesDefault() {
+        val config = AgentModelClient.ModelConfig(baseUrl = "https://example.invalid", apiKey = "fixture", model = "fixture", systemPrompt = "", requestByteBudget = 0)
+        val request = AgentRuntimeWire.RunRequest(runId = "byte-budget", prompt = "fixture", config = config, images = emptyList())
+        assertEquals(0, AgentRuntimeWire.runRequestFromBundle(AgentRuntimeWire.toLegacyBundle(request)).config.requestByteBudget)
+        val legacy = Json.decodeFromString<AgentModelClient.ModelConfig>("""{"baseUrl":"https://example.invalid","apiKey":"fixture","model":"fixture","systemPrompt":""}""")
+        assertNull(legacy.requestByteBudget)
+    }
+    @Test
+    fun failureDiagnosticSurvivesWireWithOnlyAllowedFields() {
+        val raw = """{"code":"GATEWAY_REQUEST_BODY_TIMEOUT","server_type":"request_body_timeout","phase":"request_body","upstream_started":false,"trace_id":"12345678-1234-1234-1234-123456789abc","message":"secret"}"""
+        val expected = ModelFailureDiagnostic.sanitize(raw)
+        val retry = AgentEvent.ModelRetryScheduled(2, 1, 1, 2000, "GATEWAY_REQUEST_BODY_TIMEOUT", raw)
+        val decodedRetry = AgentRuntimeWire.eventFromBundle(AgentRuntimeWire.eventToBundle(retry)) as AgentEvent.ModelRetryScheduled
+        assertEquals(expected, decodedRetry.diagnosticJson)
+        val failed = AgentEvent.RunFailed("网关超时", raw)
+        val decodedFailed = AgentEventJsonCodec.decode(AgentEventJsonCodec.encode(failed)) as AgentEvent.RunFailed
+        assertEquals(expected, decodedFailed.diagnosticJson)
+        assertFalse(decodedFailed.diagnosticJson!!.contains("secret"))
+    }
+
+    @Test
+    fun activeRunMetadataSupportsExternalAttachAndLegacyResponses() {
+        val handoff = AgentRuntimeWire.EntryHandoff(
+            id = "run-live", source = "breeno", payload = "external-metadata",
+        )
+        val active = AgentRuntimeWire.activeRunBundle("run-live", handoff)
+        assertEquals("run-live", AgentRuntimeWire.runIdFromBundle(active))
+        assertEquals(handoff, AgentRuntimeWire.activeRunHandoffFromBundle(active))
+        assertNull(AgentRuntimeWire.activeRunHandoffFromBundle(AgentRuntimeWire.ackBundle("run-old")))
+        assertNull(AgentRuntimeWire.activeRunHandoffFromBundle(AgentRuntimeWire.activeRunBundle("", handoff)))
+    }
+
+    @Test
+    fun automaticCompactionSettingSurvivesIpcAndDefaultsForOldRequests() {
+        val config = AgentModelClient.ModelConfig(
+            baseUrl = "https://example.invalid", apiKey = "fixture", model = "fixture", systemPrompt = "",
+            contextWindow = 900_000,
+            reasoningEffort = ReasoningEffort.OFF,
+        )
+        for (enabled in listOf(false, true)) {
+            val request = AgentRuntimeWire.RunRequest(
+                runId = "automatic-compaction", prompt = "继续", config = config.copy(autoCompactionEnabled = enabled),
+                images = emptyList(),
+            )
+            val bundle = AgentRuntimeWire.toLegacyBundle(request)
+            assertEquals(request, AgentRuntimeWire.runRequestFromBundle(bundle))
+            bundle.remove("auto_compaction_enabled")
+            assertTrue(AgentRuntimeWire.runRequestFromBundle(bundle).config.autoCompactionEnabled)
+        }
+    }
+
+    @Test
+    fun compactionUsageIsOptionalAndOldMeasuredFieldsRemainReadable() {
+        for (event in listOf(
+            AgentEvent.ContextCompaction("manual", "started"),
+            AgentEvent.ContextCompaction("automatic", "completed", tokensBefore = 765_000),
+            AgentEvent.ContextCompaction("legacy", "completed", tokensBefore = 9_000, tokensAfter = 2_000),
+        )) {
+            val bundle = AgentRuntimeWire.eventToBundle(event)
+            assertEquals(event.tokensBefore != null, bundle.containsKey("tokens_before"))
+            assertEquals(event.tokensAfter != null, bundle.containsKey("tokens_after"))
+            assertEquals(event, AgentRuntimeWire.eventFromBundle(bundle))
+            assertEquals(event, AgentEventJsonCodec.decode(AgentEventJsonCodec.encode(event)))
+        }
+    }
+
+    @Test
+    fun modelIdentitySurvivesWireAndArchiveWithoutResponseBody() {
+        val event = AgentEvent.ModelIdentityObserved(2, "gpt-6-luna", null)
+
+        assertEquals(event, AgentRuntimeWire.eventFromBundle(AgentRuntimeWire.eventToBundle(event)))
+        assertEquals(event, AgentEventJsonCodec.decode(AgentEventJsonCodec.encode(event)))
+    }
+
+    @Test
+    fun steeringProtocolAndRequestIdentityRoundTripAcrossBundlesAndEventJson() {
+        assertEquals(13, AgentRuntimeWire.MSG_STEER_RUN)
+        assertEquals(14, AgentRuntimeWire.MSG_STEER_RUN_RESPONSE)
+
+        val request = AgentRuntimeWire.steerBundle("run-steer", "request-steer", "请在下轮检查返回值")
+        assertEquals("run-steer", AgentRuntimeWire.runIdFromBundle(request))
+        assertEquals("request-steer", AgentRuntimeWire.steerRequestIdFromBundle(request))
+        assertEquals("请在下轮检查返回值", AgentRuntimeWire.steerTextFromBundle(request))
+
+        val accepted = AgentRuntimeWire.steerResponseBundle("request-steer", accepted = true)
+        assertEquals("request-steer", AgentRuntimeWire.steerResponseRequestId(accepted))
+        assertTrue(AgentRuntimeWire.steerAccepted(accepted))
+        assertNull(AgentRuntimeWire.steerRejectionReason(accepted))
+        val rejected = AgentRuntimeWire.steerResponseBundle(
+            "request-rejected",
+            accepted = false,
+            reason = "run 已结束",
+        )
+        assertFalse(AgentRuntimeWire.steerAccepted(rejected))
+        assertEquals("run 已结束", AgentRuntimeWire.steerRejectionReason(rejected))
+
+        val event = AgentEvent.UserSupplementReceived(
+            index = 2,
+            text = "请在下轮检查返回值",
+            requestId = "request-steer",
+        )
+        assertEquals(event, AgentRuntimeWire.eventFromBundle(AgentRuntimeWire.eventToBundle(event)))
+        assertEquals(event, AgentEventJsonCodec.decode(AgentEventJsonCodec.encode(event)))
+
+        val legacyBundle = AgentRuntimeWire.eventToBundle(event).apply { remove("request_id") }
+        assertEquals("", (AgentRuntimeWire.eventFromBundle(legacyBundle) as AgentEvent.UserSupplementReceived).requestId)
+    }
+
     @Test
     fun screenshotsKeepExactBytesAndFormatAcrossDescriptorAndInlineTransport() {
         val bitmap = Bitmap.createBitmap(32, 24, Bitmap.Config.ARGB_8888).apply {
@@ -411,6 +562,9 @@ class AgentRuntimeWireTest {
                 apiKey = "test-key",
                 model = "qwen3-max",
                 contextWindow = 262_144,
+                contextWindowKind = "total",
+                inputTokenLimit = 240_000,
+                requestByteBudget = 786_432,
                 systemPrompt = "你是手机 Agent",
                 terminalTools = true,
                 browserTools = true,
@@ -459,6 +613,9 @@ class AgentRuntimeWireTest {
 
         assertEquals(request, roundTripped)
         assertEquals(262_144, roundTripped.config.contextWindow)
+        assertEquals("total", roundTripped.config.contextWindowKind)
+        assertEquals(240_000, roundTripped.config.inputTokenLimit)
+        assertEquals(786_432, roundTripped.config.requestByteBudget)
         assertEquals(ReasoningEffort.HIGH, roundTripped.config.reasoningEffort)
     }
 
@@ -479,6 +636,8 @@ class AgentRuntimeWireTest {
         val legacyBundle = AgentRuntimeWire.toLegacyBundle(request).apply {
             remove("browser_tools")
             remove("context_window")
+            remove("context_window_kind")
+            remove("input_token_limit")
             remove("reasoning_effort")
             putBoolean("thinking_enabled", true)
         }
@@ -487,6 +646,9 @@ class AgentRuntimeWireTest {
 
         assertEquals(true, roundTripped.config.browserTools)
         assertNull(roundTripped.config.contextWindow)
+        assertEquals("unknown", roundTripped.config.contextWindowKind)
+        assertNull(roundTripped.config.requestByteBudget)
+        assertNull(roundTripped.config.inputTokenLimit)
         assertEquals(ReasoningEffort.DEFAULT, roundTripped.config.reasoningEffort)
     }
 

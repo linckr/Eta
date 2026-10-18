@@ -7,6 +7,11 @@ sealed interface AgentHomeAction {
     data class ReasoningEffortChanged(val effort: ReasoningEffort) : AgentHomeAction
     data class ModelSelected(val modelId: String) : AgentHomeAction
     data class SubmitMessage(val text: String) : AgentHomeAction
+    data class SupplementMessage(
+        val text: String,
+        val requestId: String,
+        val onResult: (Boolean) -> Unit,
+    ) : AgentHomeAction
     data object StopRun : AgentHomeAction
     data class ImageAttached(val uri: String) : AgentHomeAction
     data class RemoveImage(val id: String) : AgentHomeAction
@@ -31,27 +36,6 @@ sealed interface AgentHomeAction {
 sealed interface PermissionHealthAction {
     data class OpenItemAction(val itemId: String) : PermissionHealthAction
     data object NavigateBack : PermissionHealthAction
-}
-
-sealed interface AgentChatAction {
-    data object CompactContext : AgentChatAction
-    data object NavigateBack : AgentChatAction
-    data class ReasoningEffortChanged(val effort: ReasoningEffort) : AgentChatAction
-    data class ModelSelected(val modelId: String) : AgentChatAction
-    data class SubmitMessage(val text: String) : AgentChatAction
-    data object StopRun : AgentChatAction
-    data object OpenBrowser : AgentChatAction
-    data class ImageAttached(val uri: String) : AgentChatAction
-    data class RemoveImage(val id: String) : AgentChatAction
-    data class FilesAttached(val uris: List<String>) : AgentChatAction
-    data class FolderAttached(val uri: String) : AgentChatAction
-    data class FilePathAttached(val path: String) : AgentChatAction
-    data class RemoveFileReference(val id: String) : AgentChatAction
-    data class EditMessage(val id: String) : AgentChatAction
-    data object CancelMessageEdit : AgentChatAction
-    data class DeleteMessage(val id: String) : AgentChatAction
-    data class RegenerateMessage(val id: String) : AgentChatAction
-    data class SelectReplyCandidate(val id: String, val index: Int) : AgentChatAction
 }
 
 sealed interface AgentToolsAction {

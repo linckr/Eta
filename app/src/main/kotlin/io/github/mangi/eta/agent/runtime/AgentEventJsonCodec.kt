@@ -8,7 +8,10 @@ import org.json.JSONObject
 internal object AgentEventJsonCodec {
     fun encode(event: AgentEvent): String = bundleToJson(
         AgentRuntimeWire.eventToBundle(event)
-    ).toString()
+    ).also { json ->
+        // Archive the actual phase; only the live IPC uses legacy started for progress.
+        if (event is AgentEvent.ContextCompaction) json.put("phase", event.phase)
+    }.toString()
 
     fun decode(raw: String): AgentEvent? = runCatching {
         AgentRuntimeWire.eventFromBundle(jsonToBundle(JSONObject(raw)))

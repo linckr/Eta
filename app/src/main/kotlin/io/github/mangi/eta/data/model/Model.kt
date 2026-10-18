@@ -13,6 +13,9 @@ data class Model(
     val sortOrder: Int = 0,
     val contextWindow: Int? = null,
     val contextWindowOverride: Int? = null,
+    /** Older catalogs and manual overrides do not establish input-versus-total semantics. */
+    val contextWindowKind: String = ModelContextWindowKind.UNKNOWN,
+    val inputTokenLimit: Int? = null,
     val inputModalities: List<String> = listOf(TEXT_MODALITY),
     val outputModalities: List<String> = listOf(TEXT_MODALITY),
     val attachment: Boolean? = null,
@@ -29,7 +32,11 @@ data class Model(
     val createdAt: Long = System.currentTimeMillis()
 ) {
     val effectiveContextWindow: Int?
-        get() = contextWindowOverride ?: contextWindow
+        get() = contextWindowOverride?.takeIf { it > 0 } ?: contextWindow?.takeIf { it > 0 }
+
+    val effectiveContextWindowKind: String
+        get() = if (contextWindowOverride?.takeIf { it > 0 } != null) ModelContextWindowKind.UNKNOWN
+        else ModelContextWindowKind.normalize(contextWindowKind)
 
     val effectiveReasoning: Boolean?
         get() = reasoningOverride ?: reasoning
@@ -53,6 +60,17 @@ data class Model(
     companion object {
         const val TEXT_MODALITY = "text"
         const val IMAGE_MODALITY = "image"
+    }
+}
+
+object ModelContextWindowKind {
+    const val UNKNOWN = "unknown"
+    const val TOTAL = "total"
+    const val INPUT = "input"
+
+    fun normalize(value: String): String = when (value) {
+        TOTAL, INPUT -> value
+        else -> UNKNOWN
     }
 }
 

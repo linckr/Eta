@@ -10,8 +10,9 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 internal object AnthropicMessagesProvider : AgentProviderClient {
-    private const val DEFAULT_MAX_TOKENS = 4096
     private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
+    private val TOP_LEVEL_COMBINATORS = listOf("oneOf", "anyOf", "allOf")
+    private const val TRANSIENT_BLOCK = "_eta_transient"
 
     override val id: String = "anthropic_messages"
 
@@ -32,6 +33,8 @@ internal object AnthropicMessagesProvider : AgentProviderClient {
         onEvent: (ProviderEvent) -> Unit
     ): ProviderResponse {
         val config = request.effectiveConfig
+        val requestBody = AgentProviderRequestJson.build(request)
+        val nativeCompaction = requestBody.has("context_management")
         val headers = okhttp3.Headers.Builder()
             .add("Content-Type", "application/json; charset=utf-8")
             .add("Accept", "text/event-stream")
@@ -41,94 +44,154 @@ internal object AnthropicMessagesProvider : AgentProviderClient {
                     add("x-api-key", config.apiKey)
                 }
                 ProviderRequestHeaders.mergeInto(this, config.baseUrl, config.customHeaders, request.sessionId)
+                if (nativeCompaction) {
+                    val current = get("anthropic-beta").orEmpty().split(',').map(String::trim).filter(String::isNotBlank)
+                    set("anthropic-beta", (current + AgentNativeCompaction.ANTHROPIC_BETA).distinct().joinToString(","))
+                }
             }
             .build()
+        val trace = ModelHttpTrace(capabilities.endpoint, request.purpose, onPhase = request.onTransportPhase)
+        val observedEvents = trace.providerEvents(onEvent)
         val httpRequest = Request.Builder()
             .url(ProviderUrls.anthropicMessagesUrl(config.baseUrl))
             .headers(headers)
             .post(
-                buildRequestJson(config, request.messages, request.effectiveTools)
-                    .toString()
+                requestBody.toString()
                     .toRequestBody(JSON_MEDIA_TYPE)
             )
+            .apply { trace.attach(this) }
             .build()
 
-        val call = AgentHttpClient.modelClient.newCall(httpRequest)
+        val call = AgentHttpClient.modelClient(request.purpose, request.freshConnection).newCall(httpRequest)
         val binding = runController.register { call.cancel() }
         try {
             runController.throwIfCancelled()
-            onEvent(ProviderEvent.RequestStarted)
+            observedEvents(ProviderEvent.RequestStarted)
             call.execute().use { response ->
-                onEvent(ProviderEvent.ResponseHeaders(response.code))
+                observedEvents(ProviderEvent.ResponseHeaders(response.code))
                 runController.throwIfCancelled()
                 if (!response.isSuccessful) {
-                    val errorBody = response.peekBody(16_384).string()
-                    throw AgentModelFailure.http(response.code, errorBody)
+                    val errorSnapshot = BoundedHttpErrorBody.read(response)
+                    val errorBody = errorSnapshot.text
+                    throw AgentModelFailure.http(response.code, errorBody, trace.trustsReceiveFailure(response, errorSnapshot.complete), trace.traceId)
                 }
-                val assistant = readStreamingAssistantMessage(response.body.byteStream(), runController, onEvent)
-                onEvent(ProviderEvent.Completed(assistant.optString("finish_reason").ifBlank { null }))
-                return ProviderResponse(assistant)
+                val assistant = readStreamingAssistantMessage(trace.stream(response.body.byteStream()), runController, observedEvents)
+                if (AgentNativeCompaction.hasCompaction(assistant) && !nativeCompaction) throw AgentModelFailure(
+                    "NATIVE_COMPACTION_UNEXPECTED", false, "接口返回了未启用的原生压缩块，原始历史已保留。")
+                observedEvents(ProviderEvent.Completed(assistant.optString("finish_reason").ifBlank { null }))
+                trace.terminalReceived()
+                return ProviderResponse(assistant, trace)
             }
         } catch (throwable: Throwable) {
             runCatching { runController.throwIfCancelled() }
                 .getOrElse { interruption -> throw interruption }
-            throw throwable
+            throw trace.failure(throwable)
         } finally {
             binding.close()
         }
     }
 
-    private fun buildRequestJson(
+    internal fun buildRequestJson(
         config: AgentModelClient.ModelConfig,
         messages: JSONArray,
         tools: JSONArray
     ): JSONObject {
         val systemParts = mutableListOf<String>()
         val anthropicMessages = JSONArray()
+        // 当前轮（最后一条真实用户消息之后）的助手消息都原样带回签名块：工具循环中逐轮保持
+        // 同一前缀，缓存才能在每一轮续用；更早轮次统一去掉思考，形态在各轮之间同样稳定。
+        val currentTurnStart = (messages.length() - 1 downTo 0).firstOrNull { index ->
+            messages.optJSONObject(index)?.let { it.optString("role") == "user" && !it.optBoolean("_eta_observation") } == true
+        } ?: -1
         for (index in 0 until messages.length()) {
             val message = messages.optJSONObject(index) ?: continue
             when (message.optString("role")) {
                 "system" -> providerMessageText(message.opt("content"))
                     .takeIf { it.isNotBlank() }
                     ?.let(systemParts::add)
-                "user" -> anthropicMessages.put(
-                    JSONObject()
-                        .put("role", "user")
-                        .put("content", convertUserContent(message.opt("content")))
+                "user" -> appendTurn(
+                    anthropicMessages,
+                    "user",
+                    convertUserContent(message.opt("content")).also { blocks ->
+                        if (message.optBoolean("_eta_observation")) {
+                            for (block in 0 until blocks.length()) blocks.optJSONObject(block)?.put(TRANSIENT_BLOCK, true)
+                        }
+                    },
                 )
-                "assistant" -> anthropicMessages.put(
-                    JSONObject()
-                        .put("role", "assistant")
-                        .put("content", convertAssistantContent(message))
+                "assistant" -> appendTurn(
+                    anthropicMessages,
+                    "assistant",
+                    convertAssistantContent(message, index > currentTurnStart || AgentNativeCompaction.hasCompaction(message)),
                 )
-                "tool" -> anthropicMessages.put(
-                    JSONObject()
-                        .put("role", "user")
-                        .put(
-                            "content",
-                            JSONArray().put(
-                                JSONObject()
-                                    .put("type", "tool_result")
-                                    .put("tool_use_id", message.optString("tool_call_id"))
-                                    .put("content", message.optString("content"))
-                            )
-                        )
+                "tool" -> appendTurn(
+                    anthropicMessages,
+                    "user",
+                    JSONArray().put(
+                        JSONObject()
+                            .put("type", "tool_result")
+                            .put("tool_use_id", message.optString("tool_call_id"))
+                            .put("content", message.optString("content"))
+                    ),
                 )
             }
         }
 
         return JSONObject()
             .put("model", config.model)
-            .put("max_tokens", DEFAULT_MAX_TOKENS)
             .put("stream", true)
             .put("messages", anthropicMessages)
             .also { request ->
                 val system = systemParts.joinToString("\n\n").trim()
-                if (system.isNotBlank()) request.put("system", system)
-                convertTools(tools)?.let { request.put("tools", it) }
-                RequestBodyMerge.mergeCustomBody(request, config.customBody)
-                ProviderReasoning.applyAnthropicRequest(request, config)
+                if (system.isNotBlank()) {
+                    request.put("system", JSONArray().put(cacheBreakpoint(JSONObject().put("type", "text").put("text", system))))
+                }
+                convertTools(tools)?.let { converted ->
+                    converted.optJSONObject(converted.length() - 1)?.let(::cacheBreakpoint)
+                    request.put("tools", converted)
+                }
+                markConversationBreakpoint(anthropicMessages)
+                AgentOutputLimit.applyAnthropicOptions(request, config)
             }
+    }
+
+    /**
+     * Anthropic 只缓存显式标记的前缀。工具目录与系统提示各设一个断点，跨会话复用；
+     * 最后一条消息再设一个随轮前移的断点，下一轮按最长匹配前缀读取，覆盖整个工具循环。
+     */
+    private fun cacheBreakpoint(block: JSONObject): JSONObject =
+        block.put("cache_control", JSONObject().put("type", "ephemeral"))
+
+    private fun markConversationBreakpoint(messages: JSONArray) {
+        val content = messages.optJSONObject(messages.length() - 1)?.optJSONArray("content") ?: return
+        val blocks = (0 until content.length()).mapNotNull(content::optJSONObject)
+        // 观察截图只活一轮，断点落在它之前才能被下一轮命中；思考块不可标记，空文本标记会被拒绝。
+        val target = blocks.lastOrNull { block ->
+            !block.optBoolean(TRANSIENT_BLOCK) && when (block.optString("type")) {
+                "text" -> block.optString("text").isNotEmpty()
+                "image", "tool_result", "tool_use", "document" -> true
+                else -> false
+            }
+        }
+        target?.let(::cacheBreakpoint)
+        // 标记只服务于选断点，发送前从所有消息中清除。
+        for (message in 0 until messages.length()) {
+            val blocksOfMessage = messages.optJSONObject(message)?.optJSONArray("content") ?: continue
+            for (block in 0 until blocksOfMessage.length()) blocksOfMessage.optJSONObject(block)?.remove(TRANSIENT_BLOCK)
+        }
+    }
+
+    /**
+     * 同一批工具结果、随后的观察图片与用户补充必须落在同一条 user 消息里，且 tool_result 在前。
+     * 官方接口会合并连续同角色消息，但兼容端点不一定这样做，会把第二条 tool_result 判为孤立块。
+     */
+    private fun appendTurn(target: JSONArray, role: String, content: JSONArray) {
+        val previous = target.optJSONObject(target.length() - 1)
+        if (previous?.optString("role") != role) {
+            target.put(JSONObject().put("role", role).put("content", content))
+            return
+        }
+        val merged = previous.getJSONArray("content")
+        for (index in 0 until content.length()) merged.put(content.get(index))
     }
 
     private fun convertUserContent(content: Any?): JSONArray =
@@ -148,7 +211,10 @@ internal object AnthropicMessagesProvider : AgentProviderClient {
             else -> JSONArray().put(JSONObject().put("type", "text").put("text", providerMessageText(content)))
         }
 
-    private fun convertAssistantContent(message: JSONObject): JSONArray {
+    private fun convertAssistantContent(message: JSONObject, preserveOpaque: Boolean): JSONArray {
+        if (preserveOpaque) {
+            AnthropicEphemeralState.contentBlocks(message)?.let { return JSONArray(it.toString()) }
+        }
         val content = JSONArray()
         providerMessageText(message.opt("content"))
             .takeIf { it.isNotBlank() && it != "null" }
@@ -185,10 +251,20 @@ internal object AnthropicMessagesProvider : AgentProviderClient {
                 JSONObject()
                     .put("name", name)
                     .put("description", function.optString("description"))
-                    .put("input_schema", function.optJSONObject("parameters") ?: JSONObject().put("type", "object"))
+                    .put("input_schema", inputSchema(function.optJSONObject("parameters")))
             )
         }
         return converted.takeIf { it.length() > 0 }
+    }
+
+    /**
+     * input_schema 顶层不接受 oneOf/anyOf/allOf，否则整个请求 400。只在发送副本上移除；
+     * 参数交给对应工具执行，执行结果随工具回合返回模型。
+     */
+    private fun inputSchema(parameters: JSONObject?): JSONObject {
+        parameters ?: return JSONObject().put("type", "object")
+        if (TOP_LEVEL_COMBINATORS.none(parameters::has)) return parameters
+        return JSONObject(parameters.toString()).apply { TOP_LEVEL_COMBINATORS.forEach(::remove) }
     }
 
     private fun convertImageBlock(item: JSONObject): JSONObject? {
@@ -220,9 +296,11 @@ internal object AnthropicMessagesProvider : AgentProviderClient {
         val blocks = linkedMapOf<Int, AnthropicBlock>()
         var sawMessageStop = false
         var finishReason: String? = null
+        var stopDetails: JSONObject? = null
         var usage: AgentTokenUsage? = null
 
         readProviderSse(stream, runController) { event, payload ->
+            ModelHttpTrace.firstSseEvent(stream)
             val result = processEvent(
                 event = event,
                 payload = payload.trim(),
@@ -233,15 +311,26 @@ internal object AnthropicMessagesProvider : AgentProviderClient {
             )
             if (result.messageStop) sawMessageStop = true
             result.finishReason?.let { finishReason = it }
-            result.usage?.let {
-                usage = it
-                onEvent(ProviderEvent.Usage(it, result.contextInputTokens ?: it.inputTokens))
+            result.stopDetails?.let { stopDetails = it }
+            result.usage?.let { delta ->
+                val merged = usage?.mergedWith(delta) ?: delta
+                usage = merged
+                onEvent(ProviderEvent.Usage(merged, merged.contextTokens))
             }
             !sawMessageStop
         }
         if (!sawMessageStop) throw AgentModelFailure.incompleteStream("Anthropic SSE 流未正常结束")
-        if (blocks.values.any { it.type in setOf("text", "thinking", "tool_use") && !it.stopped }) {
+        if (blocks.values.any { it.type in setOf("text", "thinking", "redacted_thinking", "tool_use", "compaction") && !it.stopped }) {
             throw AgentModelFailure.incompleteStream("Anthropic SSE 内容块未正常结束")
+        }
+        if (blocks.values.any { it.type == "compaction" && it.text.isBlank() }) {
+            throw AgentModelFailure.incompleteStream("Anthropic 压缩块为空")
+        }
+        val toolCalls = blocks.values
+            .filter { it.type == "tool_use" && it.name.isNotBlank() }
+            .sortedBy { it.index }
+        if (toolCalls.isNotEmpty() && blocks.values.any { it.type == "thinking" && it.signature.isEmpty() }) {
+            throw AgentModelFailure.incompleteStream("Anthropic SSE 工具回合缺少思考签名")
         }
 
         return JSONObject()
@@ -251,17 +340,26 @@ internal object AnthropicMessagesProvider : AgentProviderClient {
             .put("finish_reason", finishReason.orEmpty())
             .also { message ->
                 usage?.let { message.put("usage", it.toJson()) }
-                val toolCalls = blocks.values
-                    .filter { it.type == "tool_use" && it.name.isNotBlank() }
-                    .sortedBy { it.index }
-                if (toolCalls.isNotEmpty()) {
-                    message.put(
+                stopDetails?.let { message.put("stop_details", it) }
+                if (toolCalls.isNotEmpty() || blocks.values.any { it.type == "compaction" }) {
+                    val toolCallIds = toolCalls.mapIndexed { position, block ->
+                        block.index to block.id.ifBlank { "tool_call_$position" }
+                    }.toMap()
+                    if (toolCalls.isNotEmpty()) message.put(
                         "tool_calls",
                         JSONArray().also { array ->
                             toolCalls.forEachIndexed { position, block ->
                                 array.put(block.toToolCallJson(position))
                             }
                         }
+                    )
+                    AnthropicEphemeralState.attachContentBlocks(
+                        message,
+                        JSONArray().also { array ->
+                            blocks.values.sortedBy { it.index }
+                                .mapNotNull { block -> block.toContentBlockJson(toolCallIds[block.index]) }
+                                .forEach(array::put)
+                        },
                     )
                 }
             }
@@ -303,14 +401,7 @@ internal object AnthropicMessagesProvider : AgentProviderClient {
                 "Anthropic SSE 返回错误",
             )
             "message_start" -> {
-                val rawUsage = json.optJSONObject("message")?.optJSONObject("usage")
-                EventResult(
-                    usage = parseUsage(rawUsage),
-                    contextInputTokens = rawUsage?.firstInt("input_tokens")?.let { input ->
-                        input + (rawUsage.firstInt("cache_read_input_tokens") ?: 0) +
-                            (rawUsage.firstInt("cache_creation_input_tokens") ?: 0)
-                    },
-                )
+                EventResult(usage = parseUsage(json.optJSONObject("message")?.optJSONObject("usage")))
             }
             "content_block_start" -> {
                 val index = json.optInt("index")
@@ -319,13 +410,16 @@ internal object AnthropicMessagesProvider : AgentProviderClient {
                     index = index,
                     type = block.optString("type"),
                     id = block.optString("id"),
-                    name = block.optString("name")
+                    name = block.optString("name"),
+                    initialContent = JSONObject(block.toString()),
+                    signature = StringBuilder(block.optString("signature")),
                 )
                 block.optJSONObject("input")
                     ?.takeIf { it.length() > 0 }
                     ?.let { item.arguments.append(it.toString()) }
                 blocks[index] = item
                 when (item.type) {
+                    "compaction" -> item.text.append(block.optString("content"))
                     "text" -> {
                         onEvent(ProviderEvent.BlockStart(AssistantBlockKind.TEXT, index))
                         appendVisibleDelta(item, (block.opt("text") as? String).orEmpty())
@@ -349,6 +443,11 @@ internal object AnthropicMessagesProvider : AgentProviderClient {
                 val index = json.optInt("index")
                 val delta = json.optJSONObject("delta") ?: JSONObject()
                 when (delta.optString("type")) {
+                    "compaction_delta" -> {
+                        val block = blocks[index] ?: throw AgentModelFailure.incompleteStream("压缩块缺少起始事件")
+                        if (block.type != "compaction") throw AgentModelFailure.incompleteStream("压缩块类型不匹配")
+                        block.text.append(delta.optString("content"))
+                    }
                     "text_delta" -> {
                         val block = blocks.getOrPut(index) { AnthropicBlock(index = index, type = "text") }
                         appendVisibleDelta(block, (delta.opt("text") as? String).orEmpty())
@@ -356,6 +455,9 @@ internal object AnthropicMessagesProvider : AgentProviderClient {
                     "thinking_delta" -> {
                         val block = blocks.getOrPut(index) { AnthropicBlock(index = index, type = "thinking") }
                         appendVisibleDelta(block, (delta.opt("thinking") as? String).orEmpty())
+                    }
+                    "signature_delta" -> {
+                        blocks[index]?.signature?.append(delta.optString("signature"))
                     }
                     "input_json_delta" -> {
                         val partial = delta.optString("partial_json")
@@ -396,10 +498,14 @@ internal object AnthropicMessagesProvider : AgentProviderClient {
                 )
                 EventResult()
             }
-            "message_delta" -> EventResult(
-                finishReason = json.optJSONObject("delta")?.optString("stop_reason")?.takeIf { it.isNotBlank() },
-                usage = parseUsage(json.optJSONObject("usage"))
-            )
+            "message_delta" -> {
+                val delta = json.optJSONObject("delta")
+                EventResult(
+                    finishReason = delta?.optString("stop_reason")?.takeIf { it.isNotBlank() },
+                    stopDetails = delta?.optJSONObject("stop_details"),
+                    usage = parseUsage(json.optJSONObject("usage"))
+                )
+            }
             "message_stop" -> EventResult(messageStop = true)
             else -> EventResult()
         }
@@ -411,6 +517,8 @@ internal object AnthropicMessagesProvider : AgentProviderClient {
         var id: String = "",
         var name: String = "",
         var stopped: Boolean = false,
+        val initialContent: JSONObject = JSONObject(),
+        val signature: StringBuilder = StringBuilder(),
         val text: StringBuilder = StringBuilder(),
         val thinking: StringBuilder = StringBuilder(),
         val arguments: StringBuilder = StringBuilder()
@@ -421,6 +529,23 @@ internal object AnthropicMessagesProvider : AgentProviderClient {
                 "thinking" -> thinking.toString()
                 else -> arguments.toString()
             }
+
+        fun toContentBlockJson(toolCallId: String?): JSONObject? = when (type) {
+            "compaction" -> JSONObject(initialContent.toString()).put("content", text.toString())
+            "text" -> JSONObject(initialContent.toString()).put("text", text.toString())
+            "thinking" -> JSONObject(initialContent.toString())
+                .put("thinking", thinking.toString())
+                .also { content ->
+                    if (signature.isNotEmpty()) content.put("signature", signature.toString())
+                    else content.remove("signature")
+                }
+            "redacted_thinking" -> JSONObject(initialContent.toString())
+            "tool_use" -> JSONObject(initialContent.toString())
+                .put("id", toolCallId ?: id)
+                .put("name", name)
+                .put("input", AnthropicMessagesProvider.parseJsonObject(arguments.toString()))
+            else -> null
+        }
 
         fun toToolCallJson(position: Int): JSONObject =
             JSONObject()
@@ -437,20 +562,39 @@ internal object AnthropicMessagesProvider : AgentProviderClient {
     private data class EventResult(
         val messageStop: Boolean = false,
         val finishReason: String? = null,
+        val stopDetails: JSONObject? = null,
         val usage: AgentTokenUsage? = null,
-        val contextInputTokens: Int? = null,
     )
 
+    /**
+     * Anthropic 不返回 total_tokens；本次请求实际占用的上下文是未缓存输入与缓存读写之和，
+     * 自动压缩与输入框用量都以它为准。
+     */
     private fun parseUsage(usage: JSONObject?): AgentTokenUsage? {
         usage ?: return null
         return AgentTokenUsage(
-            contextTokens = null,
+            contextTokens = usage.firstInt("input_tokens")?.let { input ->
+                input + (usage.firstInt("cache_read_input_tokens") ?: 0) +
+                    (usage.firstInt("cache_creation_input_tokens") ?: 0)
+            },
             inputTokens = usage.firstInt("input_tokens"),
             outputTokens = usage.firstInt("output_tokens"),
             reasoningTokens = usage.firstInt("thinking_output_tokens"),
             cachedTokens = usage.firstInt("cache_read_input_tokens")
         ).takeUnless { it.isEmpty }
     }
+
+    /**
+     * message_start 给出输入用量，message_delta 给出累计输出，部分兼容端点只在 delta 中补发部分字段；
+     * 后到的非空字段覆盖先到的，避免输出用量把输入与上下文占用清空。
+     */
+    private fun AgentTokenUsage.mergedWith(later: AgentTokenUsage) = AgentTokenUsage(
+        contextTokens = later.contextTokens ?: contextTokens,
+        inputTokens = later.inputTokens ?: inputTokens,
+        outputTokens = later.outputTokens ?: outputTokens,
+        reasoningTokens = later.reasoningTokens ?: reasoningTokens,
+        cachedTokens = later.cachedTokens ?: cachedTokens,
+    )
 
     private fun parseJsonObject(raw: String): JSONObject =
         runCatching { JSONObject(raw.ifBlank { "{}" }) }.getOrDefault(JSONObject())
@@ -475,4 +619,35 @@ internal object AnthropicMessagesProvider : AgentProviderClient {
         }
 
 
+}
+
+/** 只在当前 Agent run 的工具回合保留 Anthropic 签名块；稳定会话 DTO 不序列化该字段。 */
+internal object AnthropicEphemeralState {
+    private const val CONTENT_BLOCKS_KEY = "_eta_anthropic_content_blocks"
+
+    fun contentBlocks(message: JSONObject): JSONArray? = message.optJSONArray(CONTENT_BLOCKS_KEY)
+
+    fun attachContentBlocks(message: JSONObject, blocks: JSONArray) {
+        message.put(CONTENT_BLOCKS_KEY, JSONArray(blocks.toString()))
+    }
+
+    fun copyContentBlocks(source: JSONObject, target: JSONObject) {
+        contentBlocks(source)?.let { attachContentBlocks(target, it) }
+    }
+
+    fun hasPendingToolResponse(messages: JSONArray): Boolean {
+        for (index in messages.length() - 1 downTo 0) {
+            val message = messages.optJSONObject(index) ?: continue
+            if (message.optString("role") == "assistant") {
+                return contentBlocks(message) != null &&
+                    AgentConversationCodec.parseToolCalls(message).isNotEmpty()
+            }
+        }
+        return false
+    }
+
+    fun withoutContentBlocks(message: JSONObject): JSONObject =
+        if (contentBlocks(message) == null) message else JSONObject(message.toString()).apply {
+            remove(CONTENT_BLOCKS_KEY)
+        }
 }

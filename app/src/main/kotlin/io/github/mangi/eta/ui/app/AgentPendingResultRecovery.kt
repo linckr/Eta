@@ -64,6 +64,23 @@ internal object AgentPendingResultRecovery {
             .filterNot { it is SystemNoticeMessageUi && it.id == interruptedNoticeId(runId) }
             .toMutableList()
             .also { messages ->
+            // A checkpoint may already contain the structured failure event. The outbox
+            // carries the final text, not its diagnostic; preserve that event and partial output.
+            val failureIndex = messages.indexOfLast {
+                it is SystemNoticeMessageUi && it.id == "assistant-$runId-failure" &&
+                    it.code == SystemNoticeCode.RuntimeFailed
+            }
+            if (!result.ok && failureIndex >= 0) {
+                val failure = messages[failureIndex] as SystemNoticeMessageUi
+                messages[failureIndex] = failure.copy(detail = result.error ?: failure.detail)
+                messages.indices.forEach { index ->
+                    val message = messages[index]
+                    if (message is AgentMessageUi && message.isAssistantForRun(runId)) {
+                        messages[index] = message.copy(isStreaming = false)
+                    }
+                }
+                return@also
+            }
             val assistantIndex = AgentRunMessageProjector.resultTargetIndex(runId, messages, includeNotices = true)
             val resultId = AgentRunMessageProjector.resultFallbackId(runId, messages)
             val targetRound = (messages.getOrNull(assistantIndex) as? AgentMessageUi)

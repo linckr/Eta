@@ -11,7 +11,7 @@ internal object AgentConversationRevisionReducer {
         val userMessage: UserMessageUi,
         val userMessageIndex: Int,
         val historyPrefix: List<AgentModelClient.ConversationMessage>,
-        val journalPrefix: List<AgentModelClient.ConversationMessage> = historyPrefix,
+        val journalPrefix: List<AgentModelClient.ConversationMessage>,
         val laterTurnCount: Int,
         val contextWasCompacted: Boolean,
     )
@@ -27,23 +27,54 @@ internal object AgentConversationRevisionReducer {
         val targetUserOrdinal = userMessageIndices.indexOf(userMessageIndex)
         if (targetUserOrdinal < 0) return null
 
+        val laterTurnCount = userMessageIndices.size - targetUserOrdinal - 1
         val source = state.journal.ifEmpty { state.history }
-        val historyUserIndices = source.indices.filter { source[it].role == "user" }
-        // 旧版本可能已经丢失前缀；只能对已有记录做尾部对齐，不能伪造恢复。
-        val retainedUserOrdinal = historyUserIndices.size - (userMessageIndices.size - targetUserOrdinal)
-        val historyIndex = historyUserIndices.getOrNull(retainedUserOrdinal)
-        val prefix = historyIndex?.let(source::take).orEmpty()
-        val targetTurn = prefix.sumOf { it.compactedUserTurns + if (it.role == "user") 1 else 0 } + 1
-        val invalidatesSummary = prefix.any { it.contextSummary && it.summaryThroughUserTurn >= targetTurn }
-        val compacted = historyIndex == null || invalidatesSummary
+        val journalIndex = userIndex(source, userMessage.id, laterTurnCount)
+        val originalPrefix = journalIndex?.let(source::take).orEmpty()
+        val targetTurn = if (journalIndex != null) {
+            originalPrefix.userTurnCount() + 1
+        } else {
+            (source.userTurnCount() - laterTurnCount).coerceAtLeast(1)
+        }
+        fun AgentModelClient.ConversationMessage.isInvalidSummary(): Boolean = contextSummary &&
+            maxOf(summaryThroughUserTurn, compactedUserTurns) >= targetTurn
+
+        val journalPrefix = originalPrefix.filterNot { it.isInvalidSummary() }
+        val historyIndex = userIndex(state.history, userMessage.id, laterTurnCount)
+        val contextPrefix = historyIndex?.let(state.history::take)
+        // 摘要可能还包含受保护 user 的工具结果，覆盖范围不只 compactedUserTurns。
+        val invalidatesSummary = (contextPrefix ?: state.history).any { it.isInvalidSummary() }
+        val historyPrefix = if (contextPrefix != null && !invalidatesSummary) {
+            contextPrefix
+        } else {
+            // 只有修改摘要覆盖内的轮次才恢复原始记录；摘要外修改不展开 journal。
+            journalPrefix
+        }
+        val compacted = journalIndex == null || originalPrefix.any { it.isInvalidSummary() }
 
         return Boundary(
             userMessage = userMessage,
             userMessageIndex = userMessageIndex,
-            historyPrefix = prefix.filterNot { it.contextSummary && it.summaryThroughUserTurn >= targetTurn },
-            laterTurnCount = userMessageIndices.size - targetUserOrdinal - 1,
+            historyPrefix = historyPrefix,
+            journalPrefix = journalPrefix,
+            laterTurnCount = laterTurnCount,
             contextWasCompacted = compacted,
         )
+    }
+
+    private fun List<AgentModelClient.ConversationMessage>.userTurnCount(): Int =
+        sumOf { it.compactedUserTurns + if (it.role == "user") 1 else 0 }
+
+    private fun userIndex(
+        messages: List<AgentModelClient.ConversationMessage>,
+        messageId: String,
+        laterTurnCount: Int,
+    ): Int? {
+        messages.indexOfFirst { it.role == "user" && it.messageId == messageId }
+            .takeIf { it >= 0 }?.let { return it }
+        // 旧版本可能没有 messageId 或已丢失前缀，只能对已有用户记录做尾部对齐。
+        val users = messages.indices.filter { messages[it].role == "user" }
+        return users.getOrNull(users.size - laterTurnCount - 1)
     }
 
     fun deleteFromTurn(state: AgentChatUiState, targetMessageId: String): AgentChatUiState? {

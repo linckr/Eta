@@ -8,13 +8,17 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.floatPreferencesKey
+import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import io.github.mangi.eta.data.model.AppearanceAccentColor
 import io.github.mangi.eta.data.model.AppearancePaletteStyle
 import io.github.mangi.eta.data.model.AppearanceSettings
 import io.github.mangi.eta.data.model.AppearanceThemeMode
 import io.github.mangi.eta.data.model.AppearanceTopBarBlurStyle
+import io.github.mangi.eta.data.model.SpeechSettings
+import kotlinx.serialization.json.Json
 import io.github.mangi.eta.data.model.Settings
 import java.io.IOException
 import kotlinx.coroutines.flow.Flow
@@ -23,10 +27,30 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 
 internal object SettingsDataStore {
+    private val SPEECH_SETTINGS = stringPreferencesKey("speech_settings_v1")
+    private val speechJson = Json { ignoreUnknownKeys = true; encodeDefaults = true }
+
+    fun speechSettingsFlow(): Flow<SpeechSettings> {
+        ensureInitialized()
+        return dataStore.data.map { prefs ->
+            prefs[SPEECH_SETTINGS]?.let { speechJson.decodeFromString<SpeechSettings>(it) }
+                ?: SpeechSettings()
+        }
+    }
+
+    suspend fun speechSettings() = speechSettingsFlow().first()
+
+    suspend fun setSpeechSettings(settings: SpeechSettings) {
+        ensureInitialized()
+        dataStore.edit { it[SPEECH_SETTINGS] = speechJson.encodeToString(settings) }
+    }
+
     private const val STORE_NAME = "eta_settings"
 
     private val SELECTED_PROVIDER_ID = stringPreferencesKey("selected_provider_id")
     private val SELECTED_MODEL_ID = stringPreferencesKey("selected_model_id")
+    private val COMPACTION_MODEL_ID = stringPreferencesKey("compaction_model_id")
+    private val OFFICIAL_MODEL_CATALOG_REVISION = intPreferencesKey("official_model_catalog_revision")
     private val MEMORY_ENABLED = booleanPreferencesKey("memory_enabled")
     private val LINUX_DISTRIBUTION = stringPreferencesKey("linux_distribution")
     private val APPEARANCE_THEME_MODE = stringPreferencesKey("appearance_theme_mode")
@@ -42,6 +66,7 @@ internal object SettingsDataStore {
         booleanPreferencesKey("appearance_predictive_back_enabled")
     private val APPEARANCE_INTERFACE_SCALE = floatPreferencesKey("appearance_interface_scale")
     private const val SELECTED_MODEL_BY_PROVIDER_PREFIX = "selected_model_id_by_provider."
+    private const val HIDDEN_REMOTE_MODELS_PREFIX = "hidden_remote_models."
 
     private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = STORE_NAME)
 
@@ -69,6 +94,18 @@ internal object SettingsDataStore {
 
     suspend fun settings(): Settings = settingsFlow().first()
 
+    suspend fun officialModelCatalogRevision(): Int {
+        ensureInitialized()
+        return dataStore.data.first()[OFFICIAL_MODEL_CATALOG_REVISION] ?: 0
+    }
+
+    suspend fun setOfficialModelCatalogRevision(revision: Int) {
+        ensureInitialized()
+        dataStore.edit { preferences ->
+            preferences[OFFICIAL_MODEL_CATALOG_REVISION] = revision
+        }
+    }
+
     suspend fun updateSettings(transform: (Settings) -> Settings) {
         ensureInitialized()
         dataStore.edit { prefs ->
@@ -76,6 +113,7 @@ internal object SettingsDataStore {
             val updated = transform(current)
             prefs.putOrRemove(SELECTED_PROVIDER_ID, updated.selectedProviderId)
             prefs.putOrRemove(SELECTED_MODEL_ID, updated.selectedModelId)
+            prefs.putOrRemove(COMPACTION_MODEL_ID, updated.compactionModelId?.trim()?.takeIf { it.isNotEmpty() })
             prefs[MEMORY_ENABLED] = updated.memoryEnabled
             prefs.putAppearance(updated.appearance.normalized())
         }
@@ -86,6 +124,12 @@ internal object SettingsDataStore {
 
     fun selectedModelIdFlow(): Flow<String?> =
         settingsFlow().map { it.selectedModelId }
+
+    fun compactionModelIdFlow(): Flow<String?> = settingsFlow().map { it.compactionModelId }
+
+    suspend fun setCompactionModelId(id: String?) {
+        updateSettings { it.copy(compactionModelId = id?.trim()?.takeIf(String::isNotEmpty)) }
+    }
 
     suspend fun selectedModelIdForProvider(providerId: String): String? {
         ensureInitialized()
@@ -163,6 +207,33 @@ internal object SettingsDataStore {
         }
     }
 
+    suspend fun hiddenRemoteModelIds(providerId: String): Set<String> {
+        ensureInitialized()
+        return dataStore.data.first()[hiddenRemoteModelsKey(providerId)].orEmpty()
+    }
+
+    suspend fun hideRemoteModelIds(providerId: String, modelIds: Set<String>) {
+        if (modelIds.isEmpty()) return
+        ensureInitialized()
+        dataStore.edit { prefs ->
+            val key = hiddenRemoteModelsKey(providerId)
+            prefs[key] = prefs[key].orEmpty() + modelIds
+        }
+    }
+
+    suspend fun unhideRemoteModelId(providerId: String, modelId: String) {
+        ensureInitialized()
+        dataStore.edit { prefs ->
+            val key = hiddenRemoteModelsKey(providerId)
+            prefs[key] = prefs[key].orEmpty() - modelId
+        }
+    }
+
+    suspend fun clearHiddenRemoteModels(providerId: String) {
+        ensureInitialized()
+        dataStore.edit { prefs -> prefs.remove(hiddenRemoteModelsKey(providerId)) }
+    }
+
     suspend fun setMemoryEnabled(enabled: Boolean) {
         updateSettings { it.copy(memoryEnabled = enabled) }
     }
@@ -191,6 +262,9 @@ internal object SettingsDataStore {
     private fun selectedModelByProviderKey(providerId: String): Preferences.Key<String> =
         stringPreferencesKey("$SELECTED_MODEL_BY_PROVIDER_PREFIX$providerId")
 
+    private fun hiddenRemoteModelsKey(providerId: String): Preferences.Key<Set<String>> =
+        stringSetPreferencesKey("$HIDDEN_REMOTE_MODELS_PREFIX$providerId")
+
     private fun MutablePreferences.putOrRemove(key: Preferences.Key<String>, value: String?) {
         if (value.isNullOrBlank()) {
             remove(key)
@@ -202,6 +276,7 @@ internal object SettingsDataStore {
     private fun Preferences.toSettings(): Settings = Settings(
         selectedProviderId = this[SELECTED_PROVIDER_ID],
         selectedModelId = this[SELECTED_MODEL_ID],
+        compactionModelId = this[COMPACTION_MODEL_ID]?.takeIf(String::isNotBlank),
         memoryEnabled = this[MEMORY_ENABLED] ?: true,
         appearance = AppearanceSettings(
             themeMode = AppearanceThemeMode.fromPersistedValue(this[APPEARANCE_THEME_MODE]),

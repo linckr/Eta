@@ -9,9 +9,6 @@ sealed interface AppRoute : NavKey {
     data object Home : AppRoute
 
     @Serializable
-    data object Chat : AppRoute
-
-    @Serializable
     data object Browser : AppRoute
 
     @Serializable
@@ -51,6 +48,18 @@ sealed interface AppRoute : NavKey {
     data object AppearanceSettings : AppRoute
 
     @Serializable
+    data object SpeechSettings : AppRoute
+
+    @Serializable
+    data object SpeechRecognition : AppRoute
+
+    @Serializable
+    data object SpeechSynthesis : AppRoute
+
+    @Serializable
+    data object SpeechOss : AppRoute
+
+    @Serializable
     data object DataBackup : AppRoute
 
     @Serializable
@@ -70,6 +79,12 @@ sealed interface AppRoute : NavKey {
 
     @Serializable
     data object ModelProviders : AppRoute
+
+    @Serializable
+    data object CommunityCatalog : AppRoute
+
+    @Serializable
+    data class CommunityCatalogProvider(val catalogId: String) : AppRoute
 
     @Serializable
     data object McpServers : AppRoute

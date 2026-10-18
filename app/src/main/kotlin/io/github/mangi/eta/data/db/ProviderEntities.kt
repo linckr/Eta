@@ -43,6 +43,7 @@ internal data class ProviderEntity(
     @ColumnInfo(name = "hosted_web_search_enabled", defaultValue = "0")
     val hostedWebSearchEnabled: Boolean,
     @ColumnInfo(name = "anthropic_version") val anthropicVersion: String,
+    @ColumnInfo(name = "request_byte_budget") val requestByteBudget: Int? = null,
 )
 
 @Serializable
@@ -72,6 +73,8 @@ internal data class ProviderModelEntity(
     @ColumnInfo(name = "owned_by") val ownedBy: String?,
     @ColumnInfo(name = "context_window") val contextWindow: Int?,
     @ColumnInfo(name = "context_window_override") val contextWindowOverride: Int?,
+    @ColumnInfo(name = "context_window_kind", defaultValue = "'unknown'") val contextWindowKind: String = "unknown",
+    @ColumnInfo(name = "input_token_limit") val inputTokenLimit: Int? = null,
     @ColumnInfo(name = "input_modalities_json") val inputModalitiesJson: String,
     @ColumnInfo(name = "output_modalities_json") val outputModalitiesJson: String,
     @ColumnInfo(name = "attachment") val attachment: Boolean?,
@@ -119,6 +122,7 @@ internal fun ProviderSetting.toEntity(): ProviderEntity =
             is AnthropicProviderSetting -> OpenAiEndpointMode.CHAT_COMPLETIONS
         },
         hostedWebSearchEnabled = hostedWebSearchEnabled,
+        requestByteBudget = requestByteBudget,
         anthropicVersion = when (this) {
             is AnthropicProviderSetting -> anthropicVersion
             else -> AnthropicProviderSetting.DEFAULT_ANTHROPIC_VERSION
@@ -152,6 +156,7 @@ internal fun ProviderWithModels.toDomain(): ProviderSetting {
             customHeaders = ProviderJson.decodeHeaders(provider.customHeadersJson),
             customBody = ProviderJson.decodeBody(provider.customBodyJson),
             createdAt = provider.createdAt,
+            requestByteBudget = provider.requestByteBudget,
             anthropicVersion = provider.anthropicVersion.ifBlank {
                 AnthropicProviderSetting.DEFAULT_ANTHROPIC_VERSION
             },
@@ -171,6 +176,7 @@ internal fun ProviderWithModels.toDomain(): ProviderSetting {
             customHeaders = ProviderJson.decodeHeaders(provider.customHeadersJson),
             customBody = ProviderJson.decodeBody(provider.customBodyJson),
             createdAt = provider.createdAt,
+            requestByteBudget = provider.requestByteBudget,
             endpointMode = provider.endpointMode.ifBlank { OpenAiEndpointMode.CHAT_COMPLETIONS },
             hostedWebSearchEnabled = provider.hostedWebSearchEnabled,
         )
@@ -189,6 +195,7 @@ internal fun ProviderWithModels.toDomain(): ProviderSetting {
             customHeaders = ProviderJson.decodeHeaders(provider.customHeadersJson),
             customBody = ProviderJson.decodeBody(provider.customBodyJson),
             createdAt = provider.createdAt,
+            requestByteBudget = provider.requestByteBudget,
             endpointMode = provider.endpointMode.ifBlank { OpenAiEndpointMode.CHAT_COMPLETIONS },
             hostedWebSearchEnabled = provider.hostedWebSearchEnabled,
         )
@@ -214,6 +221,8 @@ private fun Model.toEntity(providerId: String): ProviderModelEntity =
         ownedBy = ownedBy,
         contextWindow = contextWindow,
         contextWindowOverride = contextWindowOverride,
+        contextWindowKind = contextWindowKind,
+        inputTokenLimit = inputTokenLimit,
         inputModalitiesJson = ProviderJson.encodeStrings(inputModalities),
         outputModalitiesJson = ProviderJson.encodeStrings(outputModalities),
         attachment = attachment,
@@ -243,6 +252,8 @@ private fun ProviderModelEntity.toDomain(): Model =
         sortOrder = sortOrder,
         contextWindow = contextWindow,
         contextWindowOverride = contextWindowOverride,
+        contextWindowKind = contextWindowKind,
+        inputTokenLimit = inputTokenLimit,
         inputModalities = ProviderJson.decodeStrings(inputModalitiesJson).ifEmpty {
             listOf(Model.TEXT_MODALITY)
         },

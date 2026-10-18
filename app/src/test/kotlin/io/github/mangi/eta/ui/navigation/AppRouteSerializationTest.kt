@@ -11,7 +11,6 @@ class AppRouteSerializationTest {
     fun allRoutesRoundTripWithMiuixNavJsonConfiguration() {
         val routes = listOf<AppRoute>(
             AppRoute.Home,
-            AppRoute.Chat,
             AppRoute.Browser,
             AppRoute.Terminal,
             AppRoute.Tools,
@@ -26,6 +25,10 @@ class AppRouteSerializationTest {
             AppRoute.SystemEnhance,
             AppRoute.Settings,
             AppRoute.AppearanceSettings,
+            AppRoute.SpeechSettings,
+            AppRoute.SpeechRecognition,
+            AppRoute.SpeechSynthesis,
+            AppRoute.SpeechOss,
             AppRoute.DataBackup,
             AppRoute.Memory,
             AppRoute.LinuxEnvironment,
@@ -33,6 +36,8 @@ class AppRouteSerializationTest {
             AppRoute.Workspace,
             AppRoute.LinuxFiles("alpine"),
             AppRoute.ModelProviders,
+            AppRoute.CommunityCatalog,
+            AppRoute.CommunityCatalogProvider("provider"),
             AppRoute.McpServers,
             AppRoute.McpServerDetail("mcp-server"),
             AppRoute.ModelProviderDetail("provider"),

@@ -80,11 +80,55 @@ class AgentModelRetryTest {
             assertFalse(AgentModelFailure.http(status, "").retryable)
         }
         assertFalse(AgentModelFailure.http(429, """{"error":{"code":"insufficient_quota"}}""").retryable)
-        assertNull(AgentModelFailure.transport(SSLHandshakeException("certificate")))
+        val tls = AgentModelFailure.transport(SSLHandshakeException("private certificate detail"))!!
+        assertEquals("MODEL_TLS_FAILED", tls.code)
+        assertFalse(tls.retryable)
+        assertFalse(tls.message!!.contains("private"))
+        val protocol = AgentModelFailure.transport(java.net.ProtocolException("private malformed headers"))!!
+        assertEquals("MODEL_PROTOCOL_FAILED", protocol.code)
+        assertFalse(protocol.retryable)
+        assertFalse(protocol.message!!.contains("private"))
         assertNull(AgentModelFailure.transport(org.json.JSONException("invalid JSON")))
         assertTrue(AgentModelFailure.stream(JSONObject().put("type", "overloaded_error"), "过载").retryable)
         assertFalse(AgentModelFailure.stream(JSONObject().put("type", "authentication_error"), "认证失败").retryable)
         assertFalse(AgentModelFailure.http(503, "secret request text").message.orEmpty().contains("secret"))
+    }
+
+    @Test
+    fun safeReceiveRetryHasIndependentSingleBudgetAndFreshConnection() {
+        var calls = 0
+        val connections = mutableListOf<Boolean>()
+        val body = """{"error":{"type":"request_body_timeout","phase":"request_body","source":"workbuddy_gateway","upstream_started":false,"trace_id":"12345678-1234-1234-1234-123456789abc"}}"""
+        val failure = assertThrows(AgentModelFailure::class.java) {
+            complete(AgentModelRetry { _, _ -> }, provider { request, _ ->
+                calls++
+                connections += request.freshConnection
+                throw AgentModelFailure.http(408, body, true, "12345678-1234-1234-1234-123456789abc")
+            })
+        }
+        assertEquals(2, calls)
+        assertEquals(listOf(false, true), connections)
+        assertFalse(failure.retryable)
+        assertTrue(failure.message!!.contains("重试一次"))
+        assertEquals("request_body_timeout", JSONObject(failure.diagnostic()!!).getString("server_type"))
+    }
+
+    @Test
+    fun transportFailureAfterVisibleTextOrThinkingDoesNotReplay() {
+        for (kind in listOf(AssistantBlockKind.TEXT, AssistantBlockKind.THINKING)) {
+            var calls = 0
+            val failure = assertThrows(AgentModelFailure::class.java) {
+                complete(AgentModelRetry { _, _ -> fail("不能重放已展示输出") }, provider { _, emit ->
+                    calls++
+                    emit(ProviderEvent.BlockDelta(kind, 0, "partial"))
+                    throw IOException("reset")
+                })
+            }
+            assertEquals(1, calls)
+            assertFalse(failure.retryable)
+            assertFalse(failure.contextRecoveryAllowed)
+            assertTrue(failure.message!!.contains("已收到部分响应"))
+        }
     }
 
     private fun complete(

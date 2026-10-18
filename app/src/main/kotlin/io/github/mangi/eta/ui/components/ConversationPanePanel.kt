@@ -28,16 +28,16 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Cloud
+import androidx.compose.material.icons.rounded.Dashboard
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Edit
-import androidx.compose.material.icons.rounded.Extension
-import androidx.compose.material.icons.rounded.Inventory2
+import androidx.compose.material.icons.rounded.ImportContacts
 import androidx.compose.material.icons.rounded.Lock
-import androidx.compose.material.icons.rounded.Memory
 import androidx.compose.material.icons.rounded.Schedule
 import androidx.compose.material.icons.rounded.Settings
-import androidx.compose.material.icons.rounded.TheaterComedy
+import androidx.compose.material.icons.rounded.SportsBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -45,9 +45,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.DpSize
-import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -56,6 +55,7 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import io.github.mangi.eta.R
 import io.github.mangi.eta.ui.model.ConversationPaneUiState
@@ -339,6 +339,15 @@ private fun ConversationTextRow(
                 ),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            conversation.characterName?.let { name ->
+                CharacterAvatar(
+                    name = name,
+                    avatarPath = conversation.characterAvatarPath,
+                    size = 36.dp,
+                    shape = CircleShape,
+                )
+                Spacer(Modifier.width(12.dp))
+            }
             Column(modifier = Modifier.weight(1f)) {
             val title = conversation.title.ifBlank { conversation.preview }
             Text(
@@ -493,19 +502,19 @@ private fun PaneDock(
             modifier = Modifier.weight(1f),
         )
         DockEntry(
-            icon = Icons.Rounded.Memory,
+            icon = Icons.Rounded.Cloud,
             label = "模型",
             onClick = onOpenModelProviders,
             modifier = Modifier.weight(1f),
         )
         DockEntry(
-            icon = Icons.Rounded.Inventory2,
+            icon = Icons.Rounded.Dashboard,
             label = "工具",
             onClick = onOpenTools,
             modifier = Modifier.weight(1f),
         )
         DockEntry(
-            icon = Icons.Rounded.Extension,
+            icon = Icons.Rounded.ImportContacts,
             label = "Skills",
             onClick = onOpenSkills,
             modifier = Modifier.weight(1f),
@@ -517,7 +526,7 @@ private fun PaneDock(
             modifier = Modifier.weight(1f),
         )
         DockEntry(
-            icon = Icons.Rounded.TheaterComedy,
+            icon = Icons.Rounded.SportsBar,
             label = "角色",
             onClick = onOpenCharacters,
             modifier = Modifier.weight(1f),

@@ -34,9 +34,8 @@ internal object OpenAiResponsesProvider : AgentProviderClient {
         require(config.openAiEndpointMode == OpenAiEndpointMode.RESPONSES) {
             "当前 Provider 未配置为 Responses API"
         }
-        val body = buildRequestJson(config, request.messages, request.effectiveTools)
-            .toString()
-            .toRequestBody(JSON_MEDIA_TYPE)
+        val requestJson = AgentProviderRequestJson.build(request)
+        val body = requestJson.toString().toRequestBody(JSON_MEDIA_TYPE)
         val headers = okhttp3.Headers.Builder()
             .add("Content-Type", "application/json; charset=utf-8")
             .add("Accept", "text/event-stream")
@@ -45,35 +44,43 @@ internal object OpenAiResponsesProvider : AgentProviderClient {
             }
             .also { ProviderRequestHeaders.mergeInto(it, config.baseUrl, config.customHeaders, request.sessionId) }
             .build()
+        val trace = ModelHttpTrace(capabilities.endpoint, request.purpose, onPhase = request.onTransportPhase)
+        val observedEvents = trace.providerEvents(onEvent)
         val httpRequest = Request.Builder()
             .url(ProviderUrls.openAiResponsesUrl(config.baseUrl))
             .headers(headers)
             .post(body)
+            .apply { trace.attach(this) }
             .build()
-        val call = AgentHttpClient.modelClient.newCall(httpRequest)
+        val call = AgentHttpClient.modelClient(request.purpose, request.freshConnection).newCall(httpRequest)
         val binding = runController.register(call::cancel)
 
         try {
             runController.throwIfCancelled()
-            onEvent(ProviderEvent.RequestStarted)
+            observedEvents(ProviderEvent.RequestStarted)
             call.execute().use { response ->
-                onEvent(ProviderEvent.ResponseHeaders(response.code))
+                observedEvents(ProviderEvent.ResponseHeaders(response.code))
                 runController.throwIfCancelled()
                 if (!response.isSuccessful) {
-                    throw AgentModelFailure.http(response.code, response.peekBody(16_384).string())
+                    val errorSnapshot = BoundedHttpErrorBody.read(response)
+                    val errorBody = errorSnapshot.text
+                    throw if (DeepSeekHttpFailure.appliesTo(config)) {
+                        DeepSeekHttpFailure.from(response.code, errorBody)
+                    } else AgentModelFailure.http(response.code, errorBody, trace.trustsReceiveFailure(response, errorSnapshot.complete), trace.traceId)
                 }
-                val assistant = readStreamingResponse(
-                    stream = response.body.byteStream(),
+                val streamed = readStreamingResponse(
+                    stream = trace.stream(response.body.byteStream()),
                     runController = runController,
-                    onEvent = onEvent,
+                    onEvent = observedEvents,
                 )
-                onEvent(ProviderEvent.Completed(assistant.optString("finish_reason").ifBlank { null }))
-                return ProviderResponse(assistant)
+                observedEvents(ProviderEvent.Completed(streamed.optString("finish_reason").ifBlank { null }))
+                trace.terminalReceived()
+                return ProviderResponse(assistantMessage = streamed, httpTrace = trace)
             }
         } catch (throwable: Throwable) {
             runCatching { runController.throwIfCancelled() }
                 .getOrElse { interruption -> throw interruption }
-            throw throwable
+            throw trace.failure(throwable)
         } finally {
             binding.close()
         }
@@ -198,6 +205,7 @@ internal object OpenAiResponsesProvider : AgentProviderClient {
         }
 
         readProviderSse(stream, runController) { eventName, data ->
+            ModelHttpTrace.firstSseEvent(stream)
             val payload = data.trim()
             if (payload == "[DONE]") return@readProviderSse true
             sawEvent = true
@@ -248,6 +256,7 @@ internal object OpenAiResponsesProvider : AgentProviderClient {
                     val itemType = item.optString("type")
                     when (itemType) {
                         "function_call" -> {
+                            ModelHttpTrace.responsesFunctionItem(stream)
                             finishActiveVisibleBlock()
                             val call = StreamingFunctionCall(
                                 itemId = itemId,
@@ -348,6 +357,7 @@ internal object OpenAiResponsesProvider : AgentProviderClient {
         if (terminalType == "response.failed") throwResponseFailure(finalResponse)
 
         val terminalOutput = finalResponse.optJSONArray("output")
+        ModelHttpTrace.responsesTerminalItems(stream, terminalOutput)
         val hasTerminalOutput = terminalOutput != null && terminalOutput.length() > 0
         val output = terminalOutput ?: JSONArray()
         val finalResult = if (terminalType == "response.completed" && !hasTerminalOutput) {
@@ -361,6 +371,14 @@ internal object OpenAiResponsesProvider : AgentProviderClient {
         fun reconcileFinalPart(part: FinalContentPart) {
             val matchingBlocks = contentBlocks.filter { block ->
                 block.kind == part.kind && block.identity.matches(part.identity)
+            }.ifEmpty {
+                // Some compatible servers remap item IDs in the terminal snapshot. Only reuse
+                // an unambiguous same-position block whose entire raw content is identical.
+                contentBlocks.filter { block ->
+                    block.kind == part.kind && block.identity.family == part.identity.family &&
+                        block.identity.outputIndex >= 0 && block.identity.outputIndex == part.identity.outputIndex &&
+                        block.identity.partIndex == part.identity.partIndex && block.content.toString() == part.rawContent
+                }.takeIf { it.size == 1 }.orEmpty()
             }
             if (matchingBlocks.size == 1) {
                 val block = matchingBlocks.single()

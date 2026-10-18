@@ -7,6 +7,13 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ConversationHistoryToolTest {
+    @Test fun stableSourceReferenceResolvesOnlyWithinCurrentJournal() {
+        val tool = ConversationHistoryTool { listOf(AgentModelClient.ConversationMessage("tool", "原始工具证据", messageId = "m1")) }
+        val ok = JSONObject(tool.execute(AgentModelClient.ToolCall("c", "conversation_history", """{"source_ref":"journal#m1"}""")).content)
+        assertEquals("journal#m1", ok.getJSONArray("entries").getJSONObject(0).getString("source_ref"))
+        val missing = JSONObject(tool.execute(AgentModelClient.ToolCall("c", "conversation_history", """{"source_ref":"journal#other-session"}""")).content)
+        assertEquals("HISTORY_SOURCE_NOT_FOUND", missing.getString("code"))
+    }
     @Test fun pagesReconstructEveryCharacterOfLargeMessage() {
         val message = AgentModelClient.ConversationMessage("assistant", "事实😀".repeat(15_000))
         var loads = 0

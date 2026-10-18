@@ -49,6 +49,52 @@ class AgentConversationStoreTest {
     }
 
     @Test
+    fun rejectedProtocolFlagPreservesOriginalReplyAcrossReload() = runBlocking {
+        val message = AgentMessageUi("rejected", "original protocol body", protocolRejected = true)
+        val state = AgentChatHomeUiState(messages = listOf(message), input = "", isStreaming = false, thinkingEnabled = false)
+        AgentConversationStore.save(context, "rejected", mapOf("rejected" to state), mapOf("rejected" to "fixture"), mapOf("rejected" to 1L))
+        EtaDatabase.closeForTests()
+        val loaded = AgentConversationStore.load(context).conversationsById.getValue("rejected").messages.single() as AgentMessageUi
+        assertTrue(loaded.protocolRejected)
+        assertEquals(message.content, loaded.content)
+    }
+
+    @Test
+    fun compactionProgressPersistsSafeCountsWithoutRestoringLiveState() = runBlocking {
+        val raw = """{"completed_slices":13,"elapsed_ms":1500000,"processed_percent":65,"source":"private history",
+            "activity":{"stage":"waiting","current_slice":14,"slice_elapsed_ms":12000,"body":"private summary"}}"""
+        val state = AgentChatHomeUiState(
+            messages = listOf(SystemNoticeMessageUi("progress", SystemNoticeCode.ContextCompaction,
+                "正在压缩上下文… 已完成 13 片 · 已用时 25分0秒", running = true, compactionProgressJson = raw)),
+            input = "", isStreaming = true, thinkingEnabled = false,
+        )
+        AgentConversationStore.save(context, "progress", mapOf("progress" to state), mapOf("progress" to "测试"), mapOf("progress" to 1L))
+        EtaDatabase.closeForTests()
+        val notice = AgentConversationStore.load(context).conversationsById.getValue("progress").messages.single() as SystemNoticeMessageUi
+        assertEquals(io.github.mangi.eta.agent.runtime.ContextCompactionProgress.sanitize(raw), notice.compactionProgressJson)
+        assertFalse(notice.compactionProgressJson!!.contains("private"))
+        assertFalse(notice.running)
+        assertEquals(null, notice.diagnosticJson)
+        assertEquals(null, io.github.mangi.eta.agent.runtime.ContextCompactionProgress.sanitize("[]"))
+        val replay = io.github.mangi.eta.agent.runtime.AgentEvent.ContextCompaction("operation", "progress", completedSlices = 13, elapsedMs = 1_500_000L)
+        val restored = AgentRunMessageProjector().applyEvent("run", replay, emptyList()).single() as SystemNoticeMessageUi
+        assertTrue(restored.running)
+    }
+
+    @Test
+    fun failureDiagnosticPersistsWithoutSchemaChangeOrProviderText() = runBlocking {
+        val raw = """{"code":"MODEL_TIMEOUT","phase":"request_body","written_bytes":42,"write_completed":true,"message":"private transcript"}"""
+        val state = AgentChatHomeUiState(
+            messages = listOf(SystemNoticeMessageUi("failure", SystemNoticeCode.RuntimeFailed, "超时", diagnosticJson = raw)),
+            input = "", isStreaming = false, thinkingEnabled = false,
+        )
+        AgentConversationStore.save(context, "failure", mapOf("failure" to state), mapOf("failure" to "测试"), mapOf("failure" to 1L))
+        val notice = AgentConversationStore.load(context).conversationsById.getValue("failure").messages.single() as SystemNoticeMessageUi
+        assertEquals(io.github.mangi.eta.agent.runtime.ModelFailureDiagnostic.sanitize(raw), notice.diagnosticJson)
+        assertFalse(notice.diagnosticJson!!.contains("private"))
+    }
+
+    @Test
     fun repeatedSavePreservesRoleBindingRevisionsPendingRewriteAndOriginalJournal() = runBlocking {
         val original = AgentModelClient.ConversationMessage(
             role = "assistant", content = "原始回答", messageId = "assistant-role-1",
@@ -185,8 +231,8 @@ class AgentConversationStoreTest {
     fun saveAndLoadPreservesSemanticSystemNoticesWithoutTranslatedContent() {
         val notice = SystemNoticeMessageUi(
             id = "assistant-run-1-1",
-            code = SystemNoticeCode.RuntimeFailed,
-            detail = "upstream timeout",
+            code = SystemNoticeCode.ModelIdentity,
+            detail = "Requested: gpt-6-sol\nReported: gpt-5.6-sol",
         )
         runBlocking {
             AgentConversationStore.save(
@@ -211,6 +257,29 @@ class AgentConversationStoreTest {
             notice,
             snapshot.conversationsById.getValue("conv-notice").messages.single(),
         )
+    }
+
+    @Test
+    fun conversationModelBindingRoundTripsAndChangeAloneIsPersisted() = runBlocking {
+        val user = UserMessageUi(id = "user-1", content = "你好")
+        val base = AgentChatHomeUiState(
+            messages = listOf(user), input = "", isStreaming = false, thinkingEnabled = false,
+            reasoningEffort = ReasoningEffort.OFF,
+        )
+        val persistence = AgentConversationPersistence()
+        fun snapshot(state: AgentChatHomeUiState) = AgentConversationStore.Snapshot(
+            selectedConversationId = "conv-a",
+            conversationsById = mapOf("conv-a" to state, "conv-b" to base),
+            titles = mapOf("conv-a" to "A", "conv-b" to "B"),
+            updatedAt = mapOf("conv-a" to 1L, "conv-b" to 1L),
+        )
+        persistence.save(context, snapshot(base.copy(modelId = "model-x")))
+        assertEquals("model-x", AgentConversationStore.load(context).conversationsById.getValue("conv-a").modelId)
+
+        persistence.save(context, snapshot(base.copy(modelId = "model-y")))
+        val restored = AgentConversationStore.load(context).conversationsById
+        assertEquals("model-y", restored.getValue("conv-a").modelId)
+        assertEquals(null, restored.getValue("conv-b").modelId)
     }
 
     @Test

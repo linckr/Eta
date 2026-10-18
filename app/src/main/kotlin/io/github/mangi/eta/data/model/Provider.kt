@@ -17,6 +17,8 @@ internal object OpenAiEndpointMode {
 internal object ProviderSourceTypes {
     const val CUSTOM = "custom"
     const val OPENAI = "openai"
+    /** ChatGPT subscription-backed Codex backend, separate from Platform API keys. */
+    const val OPENAI_CODEX = "openai_codex"
     const val ANTHROPIC = "anthropic"
     const val BAILIAN = "bailian"
     const val DEEPSEEK = "deepseek"
@@ -43,6 +45,8 @@ sealed interface ProviderSetting {
     val customHeaders: List<CustomHeader>
     val customBody: List<CustomBody>
     val createdAt: Long
+    /** Soft serialized-request budget: null = default 512 KiB, 0 = disabled, positive = bytes. */
+    val requestByteBudget: Int?
     val hostedWebSearchEnabled: Boolean
         get() = false
 }
@@ -65,6 +69,7 @@ data class OpenAiCompatibleProviderSetting(
     override val createdAt: Long = System.currentTimeMillis(),
     val endpointMode: String = OpenAiEndpointMode.CHAT_COMPLETIONS,
     override val hostedWebSearchEnabled: Boolean = false,
+    override val requestByteBudget: Int? = null,
 ) : ProviderSetting
 
 @Serializable
@@ -83,7 +88,8 @@ data class AnthropicProviderSetting(
     override val customHeaders: List<CustomHeader> = emptyList(),
     override val customBody: List<CustomBody> = emptyList(),
     override val createdAt: Long = System.currentTimeMillis(),
-    val anthropicVersion: String = DEFAULT_ANTHROPIC_VERSION
+    val anthropicVersion: String = DEFAULT_ANTHROPIC_VERSION,
+    override val requestByteBudget: Int? = null,
 ) : ProviderSetting {
     companion object {
         const val DEFAULT_ANTHROPIC_VERSION = "2023-06-01"
@@ -108,6 +114,7 @@ data class CustomProviderSetting(
     override val createdAt: Long = System.currentTimeMillis(),
     val endpointMode: String = OpenAiEndpointMode.CHAT_COMPLETIONS,
     override val hostedWebSearchEnabled: Boolean = false,
+    override val requestByteBudget: Int? = null,
 ) : ProviderSetting
 
 internal val ProviderSetting.runtimeProviderType: String
@@ -120,7 +127,8 @@ internal val ProviderSetting.runtimeProviderType: String
 internal val ProviderSetting.typeLabel: String
     get() = when (this) {
         is AnthropicProviderSetting -> "Anthropic Messages"
-        is OpenAiCompatibleProviderSetting -> "OpenAI-compatible"
+        is OpenAiCompatibleProviderSetting ->
+            if (sourceType == ProviderSourceTypes.OPENAI_CODEX) "OpenAI Codex Subscription" else "OpenAI-compatible"
         is CustomProviderSetting -> "Custom OpenAI-compatible"
     }
 
@@ -158,6 +166,18 @@ internal fun ProviderSetting.withApiKey(apiKey: String): ProviderSetting =
         is AnthropicProviderSetting -> copy(apiKey = apiKey)
         is CustomProviderSetting -> copy(apiKey = apiKey)
     }
+
+internal data class ProviderModel(val provider: ProviderSetting, val model: Model)
+
+/** 服务商与模型都启用时才视为可用；会话绑定、选择器与发送共用这一判定。 */
+internal fun List<ProviderSetting>.enabledModel(modelId: String?): ProviderModel? {
+    modelId ?: return null
+    for (provider in this) {
+        if (!provider.isEnabled) continue
+        provider.models.firstOrNull { it.id == modelId && it.isEnabled }?.let { return ProviderModel(provider, it) }
+    }
+    return null
+}
 
 internal fun ProviderSetting.selectedOrFirstModel(modelId: String?): Model? =
     models.firstOrNull { it.id == modelId && it.isEnabled }
