@@ -64,8 +64,16 @@ internal class AgentContextSession(
         } catch (failure: AgentModelFailure) {
             // An estimate is not evidence of overflow. An unavailable/unhelpful summary
             // leaves the exact original request intact for the provider to decide.
-            if (failure.code !in setOf("CONTEXT_NOT_COMPACTABLE", "CONTEXT_NO_REDUCTION")) throw failure
-            return false
+            if (failure.code in SOFT_COMPACTION_FAILURES) return false
+            // Byte-only pressure is a local upload preference, not evidence of provider
+            // capacity overflow: a failed summary must not abort the user's request.
+            // Cancellation escapes as AgentRunCancelledException, and checkpoint/storage
+            // failures stay fatal, so this fallback only covers summary and transport errors.
+            if (reason == "bytes" && failure.code !in BYTE_FALLBACK_HARD_FAILURE_CODES) {
+                logByteFallback(failure, requestBytes, byteBudget)
+                return false
+            }
+            throw failure
         }
     }
 
@@ -93,6 +101,11 @@ internal class AgentContextSession(
         runCatching { AndroidAgentLogger.info("context_request_budget purpose=${requestPurpose.name.lowercase()} " +
             "estimated_tokens=$estimatedTokens input_budget=${window ?: "unknown"} " +
             "request_bytes=${requestBytes ?: "unknown"} byte_budget=$byteBudget reason=$reason") }
+    }
+
+    private fun logByteFallback(failure: AgentModelFailure, requestBytes: Long?, byteBudget: Int) {
+        runCatching { AndroidAgentLogger.warn("context_request_budget_fallback purpose=${requestPurpose.name.lowercase()} " +
+            "code=${failure.code} request_bytes=${requestBytes ?: "unknown"} byte_budget=$byteBudget action=send_original") }
     }
 
     fun userAppended() {
@@ -207,5 +220,14 @@ internal class AgentContextSession(
     private companion object {
         const val TRIGGER_RATIO = 0.85
         const val DEFAULT_REQUEST_BYTE_BUDGET = 512 * 1024
+
+        /** Expected no-ops after an estimate: keep the original request without a failure. */
+        val SOFT_COMPACTION_FAILURES = setOf("CONTEXT_NOT_COMPACTABLE", "CONTEXT_NO_REDUCTION")
+
+        /** Storage integrity is not covered by the byte-only fallback; surface it instead of hiding it. */
+        val BYTE_FALLBACK_HARD_FAILURE_CODES = setOf(
+            "CONTEXT_SUMMARY_CHECKPOINT_FAILED",
+            "CONTEXT_SUMMARY_CHECKPOINT_INVALID",
+        )
     }
 }

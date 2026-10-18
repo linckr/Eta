@@ -1,6 +1,7 @@
 package io.github.mangi.eta.agent.model
 
 import io.github.mangi.eta.agent.runtime.AgentEvent
+import io.github.mangi.eta.agent.runtime.AgentRunCancelledException
 import io.github.mangi.eta.agent.runtime.AgentRunController
 import org.json.JSONArray
 import org.json.JSONObject
@@ -137,13 +138,50 @@ class AgentRequestByteCompactionTest {
         assertNull(unhelpful.snapshot())
     }
 
-    @Test fun realSummaryFailureKeepsOriginalHistoryAndDoesNotSendChat() {
-        val messages = messages(20_000)
+    @Test fun byteOnlySummaryFailuresKeepOriginalHistoryAndStillSendChat() {
+        val failures = listOf(
+            AgentModelFailure("CONTEXT_SUMMARY_TIMEOUT", false, "fixture summary timeout"),
+            AgentModelFailure("HTTP_400", false, "fixture invalid request"),
+            AgentModelFailure("CONTEXT_SUMMARY_INVALID", false, "fixture invalid structure"),
+        )
+        for (failure in failures) {
+            val messages = messages(20_000)
+            val original = JSONArray(messages.toString())
+            var chats = 0
+            val events = mutableListOf<AgentEvent>()
+            val loop = AgentLoop(config.copy(requestByteBudget = 16_000), messages, JSONArray(), provider { request ->
+                if (request.purpose == ProviderRequestPurpose.COMPACTION) throw failure
+                chats++
+                response("complete")
+            }, { error("No local tool replay") }, AgentRunController(), AgentTraceFormatter(), events::add, systemCount = 1)
+
+            assertEquals("complete", loop.run().content)
+            assertEquals(1, chats)
+            assertEquals(4, messages.length())
+            for (index in 0 until original.length()) {
+                assertEquals(original.get(index).toString(), messages.get(index).toString())
+            }
+            assertNull(loop.contextSnapshot())
+            assertTrue(events.filterIsInstance<AgentEvent.ContextCompaction>().any {
+                it.phase == "failed" && it.reasonCode == failure.code
+            })
+        }
+    }
+
+    @Test fun tokenPressureSummaryFailureStillAbortsAndKeepsHistory() {
+        val tokenConfig = AgentModelClient.ModelConfig(
+            baseUrl = "https://example.invalid", apiKey = "fixture", model = "fixture", systemPrompt = "fixed",
+            contextWindow = 8_000, requestByteBudget = 0,
+        )
+        val messages = messages(30_000)
         val original = messages.toString()
         var chats = 0
-        val loop = AgentLoop(config.copy(requestByteBudget = 16_000), messages, JSONArray(), provider { request ->
-            if (request.purpose != ProviderRequestPurpose.COMPACTION) chats++
-            throw AgentModelFailure("HTTP_400", false, "fixture invalid request")
+        val loop = AgentLoop(tokenConfig, messages, JSONArray(), provider { request ->
+            if (request.purpose == ProviderRequestPurpose.COMPACTION) {
+                throw AgentModelFailure("HTTP_400", false, "fixture invalid request")
+            }
+            chats++
+            response("complete")
         }, { error("No local tool replay") }, AgentRunController(), AgentTraceFormatter(), {}, systemCount = 1)
 
         val failure = assertThrows(AgentModelFailure::class.java) { loop.run() }
@@ -154,13 +192,39 @@ class AgentRequestByteCompactionTest {
         assertNull(loop.contextSnapshot())
     }
 
-    @Test fun summaryPromptItselfMustFitBeforeAnyProviderCall() {
+    @Test fun checkpointFailureStillAbortsEvenWhenBytePressureOnly() {
+        val messages = messages(20_000)
+        val original = messages.toString()
+        var chats = 0
+        val loop = AgentLoop(config.copy(requestByteBudget = 16_000), messages, JSONArray(), provider { request ->
+            if (request.purpose == ProviderRequestPurpose.COMPACTION) {
+                throw AgentModelFailure("CONTEXT_SUMMARY_CHECKPOINT_FAILED", false, "fixture checkpoint failure")
+            }
+            chats++
+            response("complete")
+        }, { error("No local tool replay") }, AgentRunController(), AgentTraceFormatter(), {}, systemCount = 1)
+
+        val failure = assertThrows(AgentModelFailure::class.java) { loop.run() }
+
+        assertEquals("CONTEXT_SUMMARY_CHECKPOINT_FAILED", failure.code)
+        assertEquals(0, chats)
+        assertEquals(original, messages.toString())
+    }
+
+    @Test fun cancellationDuringByteOnlyCompactionStillAborts() {
+        val messages = messages(20_000)
+        val controller = AgentRunController()
+        val session = AgentContextSession(config.copy(requestByteBudget = 16_000), messages, 1, "cancel-bytes",
+            provider { controller.cancel(); response("summary") }, controller, { emptySet() }, {}, {})
+        assertThrows(AgentRunCancelledException::class.java) { session.prepareForRequest(100, 20_000) }
+    }
+
+    @Test fun byteOnlySummaryInputBudgetFailureFallsBackWithoutNetwork() {
         val messages = messages(8000)
         val before = messages.toString()
         val session = session(config.copy(requestByteBudget = 1024), messages,
             server = provider { error("Preflight must reject before network") })
-        val failure = assertThrows(AgentModelFailure::class.java) { session.prepareForRequest(100, 20_000) }
-        assertEquals("CONTEXT_SUMMARY_INPUT_BUDGET", failure.code)
+        assertFalse(session.prepareForRequest(100, 20_000))
         assertEquals(before, messages.toString())
         assertNull(session.snapshot())
     }
