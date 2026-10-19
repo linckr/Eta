@@ -14,7 +14,7 @@ class AgentRequestByteCompactionTest {
         contextWindow = 960_000,
     )
 
-    @Test fun defaultBytePressureCompactsDespiteLargeManualTokenWindow() {
+    @Test fun largeInputDefaultDoesNotCompactRequestBetween512KiBAnd1MiB() {
         val messages = messages(600_000)
         val events = mutableListOf<AgentEvent>()
         val budget = AgentRequestBudget.evaluate(config, messages, JSONArray(), ProviderRequestPurpose.CHAT)
@@ -22,7 +22,64 @@ class AgentRequestByteCompactionTest {
         assertTrue(budget.estimatedTokens < 960_000 * 0.85)
         val session = session(config, messages, events = events)
 
-        assertTrue(session.prepareForRequest(budget.estimatedTokens, budget.requestBytes))
+        assertFalse(session.prepareForRequest(budget.estimatedTokens, budget.requestBytes))
+
+        assertNull(session.snapshot())
+        assertTrue(events.filterIsInstance<AgentEvent.ContextCompaction>().isEmpty())
+    }
+
+    @Test fun frozenDeepSeek540885BytePreflightSkipsSummaryAndPreservesOriginalRequest() {
+        val current = config.copy(model = "deepseek-flash", contextWindow = 1_000_000, contextWindowKind = "total")
+        val messages = messages(8_000)
+        val original = messages.toString()
+        val events = mutableListOf<AgentEvent>()
+        val session = session(current, messages, events, provider { fail("Frozen preflight must not request summary"); response("unused") })
+
+        // Frozen manifest metrics, not a new provider request or a claim of replaying its body.
+        assertFalse(session.prepareForRequest(183_591, 540_885))
+        assertEquals(original, messages.toString())
+        assertNull(session.snapshot())
+        assertTrue(events.filterIsInstance<AgentEvent.ContextCompaction>().isEmpty())
+    }
+
+    @Test fun syntheticExact540885ByteChatCompletesWithoutCompactionOrToolExecution() {
+        val current = config.copy(model = "deepseek-flash", contextWindow = 1_000_000, contextWindowKind = "total")
+        val overhead = AgentRequestBudget.evaluate(current, messages(0), JSONArray()).requestBytes.toInt()
+        val messages = messages(540_885 - overhead)
+        val original = JSONArray(messages.toString())
+        val events = mutableListOf<AgentEvent>()
+        var chats = 0
+        val loop = AgentLoop(current, messages, JSONArray(), provider { request ->
+            assertEquals(ProviderRequestPurpose.CHAT, request.purpose)
+            assertEquals(540_885L, AgentRequestBudget.evaluate(request.config, request.messages, request.tools).requestBytes)
+            assertEquals(original.toString(), request.messages.toString())
+            chats++
+            response("complete")
+        }, { error("No tools may execute") }, AgentRunController(), AgentTraceFormatter(), events::add, systemCount = 1)
+
+        assertEquals("complete", loop.run().content)
+        assertEquals(1, chats)
+        assertTrue(events.filterIsInstance<AgentEvent.ContextCompaction>().isEmpty())
+        assertNull(loop.contextSnapshot())
+    }
+
+    @Test fun oneMiBByteBoundaryOnlyCompactsStrictlyAboveThreshold() {
+        for (bytes in listOf(1_048_575L, 1_048_576L, 1_048_577L)) {
+            val messages = messages(8_000)
+            val events = mutableListOf<AgentEvent>()
+            val session = session(config, messages, events)
+            assertEquals("bytes=$bytes", bytes > 1_048_576, session.prepareForRequest(100, bytes))
+            assertEquals(if (bytes > 1_048_576) 1 else 0, events.filterIsInstance<AgentEvent.ContextCompaction>()
+                .count { it.phase == AgentEvent.ContextCompaction.PHASE_STARTED })
+        }
+    }
+
+    @Test fun smallerWindowStillCompactsAbove512KiBWithoutTokenPressure() {
+        val current = config.copy(contextWindow = 128_000)
+        val messages = messages(8_000)
+        val events = mutableListOf<AgentEvent>()
+        val session = session(current, messages, events)
+        assertTrue(session.prepareForRequest(100, 540_885))
 
         assertEquals("KEEP_LATEST_REQUEST", messages.getJSONObject(messages.length() - 1).getString("content"))
         assertNotNull(session.snapshot())
@@ -51,9 +108,18 @@ class AgentRequestByteCompactionTest {
 
     @Test fun negativeLegacyRuntimeBudgetFallsBackToDefaultInsteadOfDisablingPolicy() {
         val current = config.copy(requestByteBudget = -1)
-        val messages = messages(600_000)
+        val messages = messages(1_100_000)
         val budget = AgentRequestBudget.evaluate(current, messages, JSONArray(), ProviderRequestPurpose.CHAT)
         assertTrue(session(current, messages).prepareForRequest(budget.estimatedTokens, budget.requestBytes))
+    }
+
+    @Test fun tokenPressureStillCompactsBelowLargeInputByteThreshold() {
+        val messages = messages(8_000)
+        val events = mutableListOf<AgentEvent>()
+        val session = session(config.copy(contextWindow = 1_000_000), messages, events)
+        assertTrue(session.prepareForRequest(850_000, 540_885))
+        assertEquals("CONTEXT_TOKEN_BUDGET", events.filterIsInstance<AgentEvent.ContextCompaction>()
+            .single { it.phase == AgentEvent.ContextCompaction.PHASE_STARTED }.reasonCode)
     }
 
     @Test fun observedUsageAndBytePressureShareOnePreflightCompactionAttempt() {

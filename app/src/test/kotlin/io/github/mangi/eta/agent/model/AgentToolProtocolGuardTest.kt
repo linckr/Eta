@@ -127,6 +127,20 @@ class AgentToolProtocolGuardTest {
         assertSame(summary, AgentToolProtocolGuard.recoveryRequest(summary))
     }
 
+    @Test fun recoveryHintRespectsTheSameDerivedByteBudgetAsPreflight() {
+        val config = AgentModelClient.ModelConfig(baseUrl = "https://fixture.invalid", apiKey = "fixture",
+            model = "fixture", systemPrompt = "fixture", contextWindow = 1_000_000)
+        val messages = JSONArray().put(JSONObject().put("role", "system").put("content", "original"))
+            .put(JSONObject().put("role", "user").put("content", "x".repeat(540_885)))
+        val tools = JSONArray().put(JSONObject().put("type", "function").put("function", JSONObject().put("name", "probe")))
+        val request = ProviderRequest(config, messages, tools)
+        assertNotSame(request, AgentToolProtocolGuard.recoveryRequest(request))
+        val small = request.copy(config = config.copy(contextWindow = 128_000))
+        assertSame(small, AgentToolProtocolGuard.recoveryRequest(small))
+        val explicit = request.copy(config = config.copy(requestByteBudget = 524_288))
+        assertSame(explicit, AgentToolProtocolGuard.recoveryRequest(explicit))
+    }
+
     @Test fun recoveredRunKeepsHintForLaterRoundsWithoutRepeatingCompletedTools() {
         val requests = mutableListOf<String>()
         var executions = 0

@@ -9,6 +9,15 @@ class AgentCompactionRequestBudgetTest {
         model = "fixture", systemPrompt = "fixture")
     private fun messages(text: String) = JSONArray().put(AgentConversationCodec.userTextMessage(text))
 
+    @Test fun summaryUploadUsesSameCapacityPolicyWithItsOwnEffectiveInputReserve() {
+        val large = config.copy(contextWindow = 1_000_000, contextWindowKind = "total")
+        val request = messages("x".repeat(540_885))
+        assertEquals(1_048_576, AgentCompactionRequestBudget.evaluate(large, request).byteBudget)
+        assertTrue(AgentCompactionRequestBudget.evaluate(large, request).fits)
+        assertFalse(AgentCompactionRequestBudget.evaluate(large.copy(requestByteBudget = 524_288), request).fits)
+        assertEquals(524_288, AgentCompactionRequestBudget.evaluate(large.copy(contextWindow = 260_000), messages("small")).byteBudget)
+    }
+
     @Test fun actualProtocolBytesIncludeOldSummaryAndNewSlice() {
         val request = messages("old summary\n" + "新".repeat(5000))
         val result = AgentCompactionRequestBudget.evaluate(config, request)

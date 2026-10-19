@@ -40,7 +40,7 @@ internal object AgentToolProtocolGuard {
         val fits = runCatching {
             val budget = AgentRequestBudget.evaluate(candidate.config, messages, candidate.tools, candidate.purpose)
             val window = AgentContextBudget.requirePositiveBudget(candidate.config, candidate.purpose)
-            val bytes = candidate.config.requestByteBudget ?: 512 * 1024
+            val bytes = AgentRequestBytePolicy.resolve(candidate.config, window)
             (window == null || budget.estimatedTokens < window) && (bytes <= 0 || budget.requestBytes <= bytes)
         }.getOrDefault(false)
         return if (fits) candidate else request

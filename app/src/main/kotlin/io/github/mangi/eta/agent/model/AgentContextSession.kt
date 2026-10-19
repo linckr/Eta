@@ -154,7 +154,7 @@ internal class AgentContextSession(
     }
 
     private fun requestByteBudget(): Int =
-        config.requestByteBudget?.takeIf { it >= 0 } ?: DEFAULT_REQUEST_BYTE_BUDGET
+        AgentRequestBytePolicy.resolve(config, contextWindow)
 
     private fun logBudget(phase: String, estimatedTokens: Int, requestBytes: Long?, window: Int?, byteBudget: Int, reason: String, decisionId: String? = null) {
         emit("context_request_budget phase=$phase purpose=${requestPurpose.name.lowercase()} " +
@@ -316,7 +316,6 @@ internal class AgentContextSession(
 
     private companion object {
         const val TRIGGER_RATIO = 0.85
-        const val DEFAULT_REQUEST_BYTE_BUDGET = 512 * 1024
 
         /** Expected no-ops after an estimate: keep the original request without a failure. */
         val SOFT_COMPACTION_FAILURES = setOf("CONTEXT_NOT_COMPACTABLE", "CONTEXT_NO_REDUCTION")

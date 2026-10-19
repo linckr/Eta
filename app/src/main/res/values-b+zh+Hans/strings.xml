@@ -1398,7 +1398,7 @@
     <string name="provider_input_token_limit_unknown">接口提供的输入上限：未知</string>
     <string name="provider_input_limit_tag">输入 %1$s</string>
     <string name="provider_request_byte_budget_title">请求大小软预算</string>
-    <string name="provider_request_byte_budget_hint">留空：默认 512 KiB。0：关闭。正数：自定义预算。</string>
+    <string name="provider_request_byte_budget_hint">留空：当前模型有效输入预算达到 256,000 tokens 时用 1 MiB，其余（含未知）用 512 KiB。0：关闭。正数：自定义预算。</string>
     <string name="provider_request_byte_budget_summary">全局自动压缩开启时，提前生成摘要以减少上传体积。这是软阈值，不是 API 硬限制，必要信息可能超过阈值。0 仅关闭上传体积触发，token 容量保护仍有效。</string>
     <string name="provider_request_byte_budget_error">请输入非负 KiB 数值，小于 2 GiB，且不能包含不足一字节的部分。</string>
     <string name="settings_compaction_model">上下文摘要模型</string>
