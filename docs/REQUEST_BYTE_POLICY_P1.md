@@ -72,3 +72,14 @@ scripts/request_budget_distribution.py 只计 phase=pre 的 chat 请求；按 de
 与安装前私有备份逐表比较：原 conversations、messages、context checkpoints、所有文本块及全部 Provider/模型记录变化数均为 0；原会话模型未改变。DeepSeek 显式预算在测试前后均为 null，本轮无需修改或恢复它。新增的独立验收会话保留供查看。监听已停止，活动任务为 0。
 
 本条日志离线分析：shadow_512k_triggers=1，shadow_capacity_default_triggers=0，上传失败与 HTTP 非成功均为 0。100–200 个正常 chat 请求的 shadow 分布采样仍待单独安排；本次没有留置 48 MiB 覆盖或自动发送后续请求。
+
+## 2 MiB 候选离线回归（2026-10-20，不改变运行策略）
+
+正式采样见 [DeepSeek 请求软预算 Shadow 报告](DEEPSEEK_REQUEST_BUDGET_SHADOW_REPORT_2026-10-20.md)：208 个正常 chat 请求前检查，请求体 0.857–1.516 MiB，全部 HTTP 200、完整上传，估算输入占比 29.36%–50.46%，无 token 压力。
+
+- 冻结 208 个样本：1 MiB 越线 177 个（shadow_capacity_default_triggers=177）；2 MiB 越线 **0** 个（shadow_2mib_triggers=0）；最大请求 1,589,538 B，约为 2 MiB 的 75.8%。
+- 离线回归新增：显式 `requestByteBudget=2 MiB` 的 2 MiB−1 / 2 MiB / 2 MiB+1 严格边界；冻结分布最大请求 1,589,538 B 不触发；显式覆盖优先且 2 MiB 也参与覆盖；分布脚本新增 `over_2mib` / `shadow_2mib_triggers`（未知 token 压力不冒充纯字节触发）。
+- 结果：相关 Kotlin 回归 33 项（`AgentRequestByteCompactionTest` 24、`AgentRequestBytePolicyTest` 5、`AgentCompactionRequestBudgetTest` 4）全部通过；Python 分布脚本 9 项全部通过。未修改默认阈值、未构建/安装 APK、未新增真实模型请求。
+- 结论：2 MiB 仅作为 **DeepSeek 单 Provider 的下一候选**；本批为单 Provider、单链路、高度相关（207 次相邻比较中 197 次体积不下降）的样本，不能外推到其他 Provider、网络或 2 MiB 以上请求。若要采用，应优先通过显式 Provider 覆盖或独立 Provider 策略实现，不能直接抬高全局/所有大窗口默认值。
+
+本地离线复算（不进入仓库）：`.analysis/request-budget-2mib-20261020/distribution-2mib.txt`。

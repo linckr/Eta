@@ -16,7 +16,7 @@ class AgentRequestBytePolicyTest {
 
     @Test fun explicitZeroAndPositiveValuesWinForEveryWindow() {
         for (window in listOf(null, 128_000, 1_000_000)) {
-            for (explicit in listOf(0, 1, 524_288, 50_331_648)) {
+            for (explicit in listOf(0, 1, 524_288, 1_048_576, 2_097_152, 50_331_648)) {
                 assertEquals(explicit, AgentRequestBytePolicy.resolve(config.copy(contextWindow = window,
                     requestByteBudget = explicit)))
             }

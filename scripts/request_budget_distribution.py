@@ -33,6 +33,7 @@ FIELD = re.compile(r"(?P<key>[A-Za-z_]+)=(?P<value>\S+)")
 TRIGGER_RATIO = 0.85
 BYTES_512K = 524288
 BYTES_1MIB = 1048576
+BYTES_2MIB = 2 * 1048576
 
 
 def fields(line: str) -> dict[str, str]:
@@ -89,8 +90,10 @@ def summarize(lines: list[str]) -> dict[str, object]:
     token_pressures: list[bool | None] = []
     over_512k = 0
     over_1mib = 0
+    over_2mib = 0
     shadow_512k = 0
     shadow_capacity = 0
+    shadow_2mib = 0
     shadow_unknown = 0
     for entry in preflights:
         request_bytes = int_field(entry, "request_bytes")
@@ -113,6 +116,10 @@ def summarize(lines: list[str]) -> dict[str, object]:
                 shadow_unknown += 1
         if request_bytes > BYTES_1MIB:
             over_1mib += 1
+        if request_bytes > BYTES_2MIB:
+            over_2mib += 1
+            if pressure is False:
+                shadow_2mib += 1
         derived_budget = BYTES_1MIB if budget is not None and budget >= 256_000 else BYTES_512K
         if pressure is False and request_bytes > derived_budget:
             shadow_capacity += 1
@@ -145,9 +152,13 @@ def summarize(lines: list[str]) -> dict[str, object]:
         "over_512k_ratio": round(over_512k / requests, 4) if requests else 0.0,
         "over_1mib": over_1mib,
         "over_1mib_ratio": round(over_1mib / requests, 4) if requests else 0.0,
+        "over_2mib": over_2mib,
+        "over_2mib_ratio": round(over_2mib / requests, 4) if requests else 0.0,
         "shadow_512k_triggers": shadow_512k,
         "shadow_512k_trigger_ratio": round(shadow_512k / requests, 4) if requests else 0.0,
         "shadow_capacity_default_triggers": shadow_capacity,
+        "shadow_2mib_triggers": shadow_2mib,
+        "shadow_2mib_trigger_ratio": round(shadow_2mib / requests, 4) if requests else 0.0,
         "shadow_unknown_window": shadow_unknown,
         "token_pressure": sum(1 for pressure in token_pressures if pressure is True),
         "token_pressure_ratio_unknown": sum(1 for pressure in token_pressures if pressure is None),

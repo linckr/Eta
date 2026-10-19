@@ -74,6 +74,32 @@ class AgentRequestByteCompactionTest {
         }
     }
 
+    @Test fun explicitTwoMiBCandidateOnlyCompactsStrictlyAboveThreshold() {
+        for (bytes in listOf(2_097_151L, 2_097_152L, 2_097_153L)) {
+            val messages = messages(8_000)
+            val events = mutableListOf<AgentEvent>()
+            val session = session(config.copy(requestByteBudget = 2 * 1024 * 1024), messages, events)
+            assertEquals("bytes=$bytes", bytes > 2_097_152, session.prepareForRequest(100, bytes))
+            assertEquals(if (bytes > 2_097_152) 1 else 0, events.filterIsInstance<AgentEvent.ContextCompaction>()
+                .count { it.phase == AgentEvent.ContextCompaction.PHASE_STARTED })
+        }
+    }
+
+    @Test fun frozenDistributionMaxRequestStaysBelowExplicitTwoMiBCandidate() {
+        val current = config.copy(model = "deepseek-flash", contextWindow = 1_000_000,
+            contextWindowKind = "total", requestByteBudget = 2 * 1024 * 1024)
+        val messages = messages(8_000)
+        val original = messages.toString()
+        val events = mutableListOf<AgentEvent>()
+        val session = session(current, messages, events)
+
+        // Frozen shadow sample max request_bytes (2026-10-20): 1,589,538 B.
+        assertFalse(session.prepareForRequest(160_000, 1_589_538))
+        assertEquals(original, messages.toString())
+        assertNull(session.snapshot())
+        assertTrue(events.filterIsInstance<AgentEvent.ContextCompaction>().isEmpty())
+    }
+
     @Test fun smallerWindowStillCompactsAbove512KiBWithoutTokenPressure() {
         val current = config.copy(contextWindow = 128_000)
         val messages = messages(8_000)

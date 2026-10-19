@@ -97,6 +97,18 @@ class DistributionTest(unittest.TestCase):
         ]
         self.assertEqual(distribution.summarize(lines)["shadow_capacity_default_triggers"], 2)
 
+    def test_two_mib_candidate_shadow_uses_strict_boundary_and_token_pressure(self):
+        lines = [
+            SAMPLE[1].replace("request_bytes=540885", "request_bytes=2097151"),
+            SAMPLE[1].replace("request_bytes=540885", "request_bytes=2097152"),
+            SAMPLE[1].replace("request_bytes=540885", "request_bytes=2097153"),
+            SAMPLE[1].replace("request_bytes=540885", "request_bytes=2200000").replace("reason=none", "reason=token"),
+        ]
+        summary = distribution.summarize(lines)
+        self.assertEqual(summary["over_2mib"], 2)
+        self.assertEqual(summary["shadow_2mib_triggers"], 1)
+        self.assertEqual(summary["token_pressure"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()
