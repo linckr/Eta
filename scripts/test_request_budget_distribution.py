@@ -53,12 +53,49 @@ class DistributionTest(unittest.TestCase):
 
     def test_non_chat_and_legacy_phase_are_ignored(self):
         lines = [
+            "I Eta : context_request_budget purpose=chat estimated_tokens=1 input_budget=1000000 request_bytes=999999 byte_budget=524288 reason=bytes",
             "I Eta : context_request_budget phase=pre purpose=compaction estimated_tokens=1 input_budget=1 request_bytes=999999 byte_budget=524288 reason=bytes",
             "I Eta : model_http_trace purpose=compaction event=http_call_completed status=200",
         ]
         summary = distribution.summarize(lines)
         self.assertEqual(summary["requests"], 0)
         self.assertEqual(summary["http_completed"], 0)
+
+    def test_repeated_capture_lines_are_deduplicated_by_ids(self):
+        pre = SAMPLE[1] + " decision_id=same"
+        trace = SAMPLE[6]
+        summary = distribution.summarize([pre, pre, trace, trace])
+        self.assertEqual(summary["requests"], 1)
+        self.assertEqual(summary["http_completed"], 1)
+        self.assertEqual(summary["duplicate_preflights_ignored"], 1)
+        self.assertEqual(summary["duplicate_http_traces_ignored"], 1)
+
+    def test_http_error_after_upload_is_not_upload_failure(self):
+        lines = [
+            "model_http_trace purpose=chat event=http_call_completed trace_id=a status=400 write_completed=true",
+            "model_http_trace purpose=chat event=http_call_completed trace_id=b status=unknown write_completed=false",
+            "model_http_trace purpose=chat event=http_call_completed trace_id=c status=429",
+        ]
+        summary = distribution.summarize(lines)
+        self.assertEqual(summary["http_upload_failures"], 1)
+        self.assertEqual(summary["http_non_success"], 2)
+        self.assertEqual(summary["http_write_state_unknown"], 1)
+
+    def test_observed_token_pressure_is_not_shadow_byte_only(self):
+        line = SAMPLE[1].replace("reason=none", "reason=token")
+        summary = distribution.summarize([line])
+        self.assertEqual(summary["token_pressure"], 1)
+        self.assertEqual(summary["shadow_512k_triggers"], 0)
+        self.assertEqual(summary["shadow_capacity_default_triggers"], 0)
+
+    def test_capacity_shadow_uses_current_effective_input_and_strict_byte_boundary(self):
+        lines = [
+            SAMPLE[1],  # 540885 B at 1M: no new default trigger.
+            SAMPLE[1].replace("input_budget=1000000", "input_budget=128000").replace("estimated_tokens=183591", "estimated_tokens=1000"),
+            SAMPLE[1].replace("request_bytes=540885", "request_bytes=1048576"),
+            SAMPLE[1].replace("request_bytes=540885", "request_bytes=1048577"),
+        ]
+        self.assertEqual(distribution.summarize(lines)["shadow_capacity_default_triggers"], 2)
 
 
 if __name__ == "__main__":
