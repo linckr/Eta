@@ -1420,7 +1420,7 @@
     <string name="provider_input_token_limit_unknown">Advertised input limit: unknown</string>
     <string name="provider_input_limit_tag">Input %1$s</string>
     <string name="provider_request_byte_budget_title">Request size soft budget</string>
-    <string name="provider_request_byte_budget_hint">Blank: default 512 KiB. 0: disabled. Positive value: custom budget.</string>
+    <string name="provider_request_byte_budget_hint">Blank: 1 MiB when the current model has an effective input budget of at least 256,000 tokens; otherwise 512 KiB, including unknown budgets. 0: disabled. Positive value: custom budget.</string>
     <string name="provider_request_byte_budget_summary">When automatic context compaction is enabled, summarize earlier to reduce uploads. This is a soft threshold, not an API limit; required information may exceed it. 0 disables only the upload-size trigger; token capacity protection remains enabled.</string>
     <string name="provider_request_byte_budget_error">Enter a non-negative KiB value below 2 GiB, with no fractional bytes.</string>
     <string name="settings_compaction_model">Context summary model</string>

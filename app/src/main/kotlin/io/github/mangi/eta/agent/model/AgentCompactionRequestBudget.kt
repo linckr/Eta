@@ -15,7 +15,7 @@ internal object AgentCompactionRequestBudget {
         val usable = if (window != null && config.contextWindowKind == "total")
             (window.toLong() - output).coerceAtLeast(0).toInt() else window
         val input = listOfNotNull(usable, config.inputTokenLimit?.takeIf { it > 0 }).minOrNull()
-        val bytes = config.requestByteBudget?.takeIf { it >= 0 } ?: 512 * 1024
+        val bytes = AgentRequestBytePolicy.resolve(config, input)
         val request = AgentRequestBudget.evaluate(config, messages, JSONArray(), purpose)
         val fits = (input == null || request.estimatedTokens <= input * 0.85) &&
             (bytes == 0 || request.requestBytes <= bytes.toLong())

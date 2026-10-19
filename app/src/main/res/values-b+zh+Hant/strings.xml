@@ -1372,7 +1372,7 @@
     <string name="provider_input_token_limit_unknown">介面提供的輸入上限：未知</string>
     <string name="provider_input_limit_tag">輸入 %1$s</string>
     <string name="provider_request_byte_budget_title">請求大小軟預算</string>
-    <string name="provider_request_byte_budget_hint">留空：預設 512 KiB。0：關閉。正數：自訂預算。</string>
+    <string name="provider_request_byte_budget_hint">留空：目前模型有效輸入預算達到 256,000 tokens 時用 1 MiB，其餘（含未知）用 512 KiB。0：關閉。正數：自訂預算。</string>
     <string name="provider_request_byte_budget_summary">全域自動壓縮開啟時，提前產生摘要以減少上傳體積。這是軟閾值，不是 API 硬限制，必要資訊可能超過閾值。0 僅關閉上傳體積觸發，token 容量保護仍有效。</string>
     <string name="provider_request_byte_budget_error">請輸入非負 KiB 數值，小於 2 GiB，且不能包含不足一位元組的部分。</string>
     <string name="settings_compaction_model">上下文摘要模型</string>
