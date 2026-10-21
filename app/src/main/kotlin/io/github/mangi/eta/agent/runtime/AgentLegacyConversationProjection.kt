@@ -19,22 +19,35 @@ internal object AgentLegacyConversationProjection {
     ): String {
         val bounded = AgentConversationCodec.decodeTranscript(
             AgentConversationCodec.encodeTranscriptForStorage(messages),
-        ).toMutableList()
-        var encoded = json.encodeToString(bounded)
+        )
+        val encoded = json.encodeToString(bounded)
         if (encoded.length <= maxChars) return encoded
 
         val notice = AgentModelClient.ConversationMessage(
             role = "system",
             content = COMPACTION_NOTICE,
         )
-        while (bounded.size > 1) {
-            bounded.removeAt(0)
-            while (bounded.firstOrNull()?.role == "tool") bounded.removeAt(0)
-            encoded = json.encodeToString(listOf(notice) + bounded)
-            if (encoded.length <= maxChars) return encoded
+        // Legacy preview only: encoding every successively shorter suffix was quadratic
+        // and blocked the full FD-backed request for tens of seconds on long conversations.
+        // Encode each item once; exact UTF-16 lengths preserve the previous cutoff behavior.
+        val items = bounded.map { json.encodeToString(it) }
+        val suffixChars = LongArray(items.size + 1)
+        for (index in items.indices.reversed()) suffixChars[index] = suffixChars[index + 1] + items[index].length
+        val noticeJson = json.encodeToString(notice)
+        var start = 0
+        while (bounded.size - start > 1) {
+            start++
+            while (start < bounded.size && bounded[start].role == "tool") start++
+            val remaining = bounded.size - start
+            val length = 2L + noticeJson.length + suffixChars[start] + remaining
+            if (length <= maxChars) return buildString(length.toInt()) {
+                append('[').append(noticeJson)
+                for (index in start until items.size) append(',').append(items[index])
+                append(']')
+            }
         }
 
-        val last = bounded.lastOrNull() ?: return "[]"
+        val last = bounded.getOrNull(start) ?: return "[]"
         val compacted = last.copy(
             content = last.content.take(maxChars / 4),
             contentJson = "",

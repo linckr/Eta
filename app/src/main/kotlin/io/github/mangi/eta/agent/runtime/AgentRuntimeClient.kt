@@ -49,6 +49,8 @@ internal class AgentRuntimeClient(
         request: AgentRuntimeWire.RunRequest,
         onEvent: (AgentEvent) -> Unit
     ): AgentRuntimeWire.RunResult {
+        val preparationTrace = AgentPreparationTrace(request.runId, "client", logger)
+        preparationTrace.mark(AgentPreparationTrace.Stage.QUEUED)
         val resultLatch = CountDownLatch(1)
         val resultRef = AgentResultMailbox()
         val preparedImagesRef = AtomicReference<AgentRuntimeImageTransfer.PreparedImages?>()
@@ -68,6 +70,7 @@ internal class AgentRuntimeClient(
         val lease = AgentRuntimeConnection.acquire(context, logger)
             ?: return AgentRuntimeWire.RunResult("", false, "", "Agent Runtime 服务绑定失败")
         val serviceMessenger = lease.messenger
+        preparationTrace.mark(AgentPreparationTrace.Stage.BOUND)
         val deathRecipient = IBinder.DeathRecipient {
             if (resultRef.get() == null) {
                 resultRef.set(
@@ -84,7 +87,9 @@ internal class AgentRuntimeClient(
             val preparedImages = AgentRuntimeImageTransfer.prepare(context, request.images)
             preparedImagesRef.set(preparedImages)
             msg.data = AgentRuntimeWire.toBundle(request, preparedImages.images, context.cacheDir)
+            preparationTrace.mark(AgentPreparationTrace.Stage.PAYLOAD_READY)
             AgentWireText.send(serviceMessenger, msg)
+            preparationTrace.mark(AgentPreparationTrace.Stage.SENT)
             // 最终结果或 Binder 断连负责唤醒；正常长任务不因客户端等待时长被取消。
             resultLatch.await()
             return resultRef.get()?.let(AgentRuntimeWire::runResultFromBundle) ?: AgentRuntimeWire.RunResult("", false, "", "Agent Runtime 未返回结果")

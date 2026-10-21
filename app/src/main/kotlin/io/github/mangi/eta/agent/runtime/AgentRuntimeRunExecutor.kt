@@ -79,12 +79,15 @@ internal class AgentRuntimeRunExecutor(
         var cancelled = false
         var checkpointRecorder: AgentRunCheckpointRecorder? = null
         val timing = AgentRunTiming(AndroidAgentLogger)
+        val preparationTrace = AgentPreparationTrace(request.runId, "runtime", AndroidAgentLogger)
+        preparationTrace.mark(AgentPreparationTrace.Stage.QUEUED)
 
         // 失败清理需要在 try 外拿到会话 id。
         var memoryConversationId: String? = null
         val result = try {
             val contextWindow = request.config.knownContextWindow
             checkpointRecorder = AgentRunCheckpointRecorder.create(appContext, request)
+            preparationTrace.mark(AgentPreparationTrace.Stage.CHECKPOINT_READY)
             entrySurfaceGuard = EntrySurfaceGuard.from(
                 handoff = request.handoff,
                 logger = AndroidAgentLogger,
@@ -105,6 +108,7 @@ internal class AgentRuntimeRunExecutor(
                     .filter { SkillCompatibilityChecker.evaluate(it).available },
             )
             val memoryEnabled = runBlocking { AgentMemoryRepository.isEnabled() }
+            preparationTrace.mark(AgentPreparationTrace.Stage.SKILLS_READY)
             val uiPayload = request.handoff
                 ?.takeIf { it.source == AgentRuntimeWire.AGENT_UI_HANDOFF_SOURCE }
                 ?.let { AgentUiHandoffPayload.from(it.payload) }
@@ -153,6 +157,7 @@ internal class AgentRuntimeRunExecutor(
                 }
             }
             val pendingSkillConflict = PendingSkillConflictCapabilityParser.parse(request.history)
+            preparationTrace.mark(AgentPreparationTrace.Stage.CONTEXT_READY)
             val mcpSnapshot = runBlocking {
                 runCatching { McpRunSnapshot.load() }.getOrElse { throwable ->
                     AndroidAgentLogger.warnThrottled("agent_mcp_snapshot_failed") {
@@ -234,6 +239,7 @@ internal class AgentRuntimeRunExecutor(
             toolExecutor = routingExecutor
             toolsBinding = runController.register(routingExecutor::close)
             timing.preparationFinished(skillContext.installedSkills.size)
+            preparationTrace.mark(AgentPreparationTrace.Stage.MODEL_READY)
             val historyTool = conversationId?.let { id ->
                 ConversationHistoryTool {
                     val checkpoint = runBlocking { EtaDatabase.get(appContext).conversationDao().contextCheckpoint(id) }

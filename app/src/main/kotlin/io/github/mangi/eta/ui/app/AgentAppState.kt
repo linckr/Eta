@@ -1176,6 +1176,8 @@ internal class AgentAppState(
         rewriteTargetMessageId: String? = null,
     ) {
         runConversationIds[runId] = conversationId
+        val preparationTrace = io.github.mangi.eta.agent.runtime.AgentPreparationTrace(runId, "ui", AndroidAgentLogger)
+        preparationTrace.mark(io.github.mangi.eta.agent.runtime.AgentPreparationTrace.Stage.QUEUED)
         currentRunId = runId
         // 发送即绑定：会话记住本轮实际使用的模型，回落到默认模型时也随之更新。
         val runModelId = state.effectiveModelId
@@ -1211,6 +1213,7 @@ internal class AgentAppState(
                 }
                 return@launch
             }
+            preparationTrace.mark(io.github.mangi.eta.agent.runtime.AgentPreparationTrace.Stage.PERSISTED)
             state.roleplay?.let { binding ->
                 try {
                     CharacterRepository.initialize(appContext)
@@ -1286,6 +1289,7 @@ internal class AgentAppState(
                 }
                 return@launch
             }
+            preparationTrace.mark(io.github.mangi.eta.agent.runtime.AgentPreparationTrace.Stage.CONFIG_READY)
             val result = runInterruptible {
                 AgentRuntimeClient(appContext, AndroidAgentLogger).run(
                     request = AgentRuntimeWire.RunRequest(
