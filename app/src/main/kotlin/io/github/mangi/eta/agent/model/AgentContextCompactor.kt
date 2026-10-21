@@ -16,8 +16,9 @@ internal class AgentContextCompactor(
     private val support: AgentCompactionSupport = AgentCompactionSupport(),
     private val onProgress: (completedSlices: Int, resumed: Boolean) -> Unit = { _, _ -> },
     private val onActivity: (io.github.mangi.eta.agent.runtime.ContextCompactionActivity) -> Unit = {},
-    private val candidateFits: (JSONArray) -> Boolean = { false },
+    private val candidateVerdict: (JSONArray) -> AgentCandidateVerdict = { AgentCandidateVerdict.reject() },
 ) {
+    private data class RetainedCandidate(val candidate: JSONArray, val requestBytes: Long)
     private var completedSummarizer: AgentContextSummarizer? = null
     fun clearCompletedCheckpoint() { runCatching { completedSummarizer?.clearCompletedCheckpoint() } }
     fun compact(
@@ -54,13 +55,32 @@ internal class AgentContextCompactor(
             message.copy(content = text, contentJson = "", reasoningContent = "")
         }
         val summarizer = AgentContextSummarizer(config, provider, controller, roleplay, onEvent, providerResolver, support, onProgress, onActivity)
+        var retained: RetainedCandidate? = null
         val summary = summarizer.summarize(safe) { text, count ->
             // Only complete tool boundaries can form an early candidate. Index mapping is
             // deliberately checked: a codec that removes records must not shorten coverage.
             if (safe.size != sourceMessages.size || count <= 0) false else {
                 val originalEnd = history.indexOf(sourceMessages[count - 1]) + 1
-                canSplit(history, originalEnd) && buildCandidate(messages, systemCount, history, safe, text,
-                    count, originalEnd, protectedUser).let { it.toString().length < messages.toString().length && candidateFits(it) }
+                if (!canSplit(history, originalEnd)) false else {
+                    val candidate = buildCandidate(messages, systemCount, history, safe, text,
+                        count, originalEnd, protectedUser)
+                    if (candidate.toString().length >= messages.toString().length) false else {
+                        val verdict = candidateVerdict(candidate)
+                        when (verdict.action) {
+                            AgentCandidateAction.TAKE_AND_STOP -> true
+                            AgentCandidateAction.RETAIN_AND_CONTINUE -> {
+                                // Keep the smallest valid budget-passing candidate while the
+                                // summarizer continues toward the headroom target. It is only
+                                // used after normal completion, never to hide a summary error.
+                                if (retained == null || verdict.requestBytes < retained!!.requestBytes) {
+                                    retained = RetainedCandidate(candidate, verdict.requestBytes)
+                                }
+                                false
+                            }
+                            AgentCandidateAction.REJECT -> false
+                        }
+                    }
+                }
             }
         }
         completedSummarizer = summarizer
@@ -69,6 +89,11 @@ internal class AgentContextCompactor(
         val result = buildCandidate(messages, systemCount, history, safe, summary, count, actualEnd, protectedUser)
         if (result.toString().length >= messages.toString().length) {
             throw failure("CONTEXT_NO_REDUCTION", "摘要未能缩小上下文，原始上下文已保留。")
+        }
+        // Do not let the final candidate silently exceed the budget when a valid retained
+        // candidate was already built. Never use it to mask a failure; this is the normal end.
+        if (candidateVerdict(result).action == AgentCandidateAction.REJECT) {
+            retained?.let { return it.candidate }
         }
         return result
     }

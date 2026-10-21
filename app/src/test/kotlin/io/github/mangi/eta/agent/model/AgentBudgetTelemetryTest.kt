@@ -34,6 +34,7 @@ class AgentBudgetTelemetryTest {
             purpose = "chat", trigger = "both", action = "compact_done",
             estimatedTokens = 10, inputBudget = null, requestBytes = null, byteBudget = 0,
             elapsedMs = 1500, tokensAfter = 7, bytesAfter = 900,
+            byteTargetBytes = 1_000, headroomBytes = -100, byteTargetStatus = "not_met",
         )
         assertTrue(line.contains("essential=true"))
         assertTrue(line.contains("action=compact_done"))
@@ -41,6 +42,9 @@ class AgentBudgetTelemetryTest {
         assertTrue(line.contains("request_bytes=unknown"))
         assertTrue(line.contains("tokens_after=7"))
         assertTrue(line.contains("bytes_after=900"))
+        assertTrue(line.contains("byte_target_bytes=1000"))
+        assertTrue(line.contains("headroom_bytes=-100"))
+        assertTrue(line.contains("byte_target_status=not_met"))
         assertTrue(line.contains("duration_ms=1500"))
         assertParsableWithoutContent(line)
     }

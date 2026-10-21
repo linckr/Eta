@@ -237,9 +237,10 @@ class AgentHierarchicalCompactionTest {
         val original = messages.toString()
         val fake = Fake()
         val compacted = AgentContextCompactor(config, fake, AgentRunController(),
-            support = AgentCompactionSupport(hierarchical = true), candidateFits = {
+            support = AgentCompactionSupport(hierarchical = true), candidateVerdict = {
                 val budget = AgentRequestBudget.evaluate(config, it, JSONArray())
-                budget.requestBytes <= 512 * 1024 && budget.estimatedTokens <= 128_000 * 0.80
+                if (budget.requestBytes <= 512 * 1024 && budget.estimatedTokens <= 128_000 * 0.80)
+                    AgentCandidateVerdict.stop(budget.requestBytes) else AgentCandidateVerdict.reject(budget.requestBytes)
             }).compact(messages, 0, emptySet())
         val finalBudget = AgentRequestBudget.evaluate(config, compacted, JSONArray())
         assertTrue(finalBudget.requestBytes <= 512 * 1024)
@@ -247,6 +248,28 @@ class AgentHierarchicalCompactionTest {
         assertTrue(fake.leaves + fake.merges <= 128)
         assertEquals(original, messages.toString())
         assertTrue(compacted.getJSONObject(0).optBoolean("_eta_context_summary"))
+        assertEquals("继续当前任务", compacted.getJSONObject(compacted.length() - 1).getString("content"))
+    }
+
+    @Test fun retainedCandidateIsReturnedWhenFinalCandidateRejects() {
+        val source = history(20)
+        val messages = JSONArray(source.map(AgentConversationCodec::toJsonObject)).put(AgentConversationCodec.userTextMessage("继续当前任务"))
+        val original = messages.toString()
+        var calls = 0
+        var retained: String? = null
+        val compacted = AgentContextCompactor(config, Fake(), AgentRunController(),
+            support = AgentCompactionSupport(hierarchical = true), candidateVerdict = { candidate ->
+                calls++
+                val budget = AgentRequestBudget.evaluate(config, candidate, JSONArray())
+                if (calls == 1) {
+                    retained = candidate.toString()
+                    AgentCandidateVerdict.retain(budget.requestBytes)
+                } else AgentCandidateVerdict.reject(budget.requestBytes)
+            }).compact(messages, 0, emptySet())
+
+        assertEquals(retained, compacted.toString())
+        assertTrue(calls >= 2)
+        assertEquals(original, messages.toString())
         assertEquals("继续当前任务", compacted.getJSONObject(compacted.length() - 1).getString("content"))
     }
 

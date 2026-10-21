@@ -47,6 +47,7 @@ internal class AgentContextSession(
         val byteBudget: Int,
         val startedAt: Long,
         val decisionId: String,
+        val byteGoal: AgentByteCompactionGoal? = null,
     )
 
     fun snapshot(): AgentContextSnapshot? = committedSnapshot
@@ -63,6 +64,7 @@ internal class AgentContextSession(
             inputTokens?.let { it >= window * TRIGGER_RATIO } == true)
         val bytePressure = byteBudget > 0 && requestBytes?.let { it > byteBudget.toLong() } == true
         val reason = budgetReason(tokenPressure, bytePressure)
+        val byteGoal = AgentByteCompactionGoal.forTrigger(reason, byteBudget)
         val decisionId = newDecisionId()
         logBudget("pre", estimatedTokens, requestBytes, window, byteBudget, reason, decisionId)
         if (AnthropicEphemeralState.hasPendingToolResponse(messages)) {
@@ -89,8 +91,8 @@ internal class AgentContextSession(
                 "both" -> "CONTEXT_TOKEN_AND_BYTE_BUDGET"
                 "bytes" -> "CONTEXT_REQUEST_BYTE_BUDGET"
                 else -> "CONTEXT_TOKEN_BUDGET"
-            })
-            pendingCompaction = PendingCompaction(reason, estimatedTokens, window, requestBytes, byteBudget, startedAt, decisionId)
+            }, byteGoal = byteGoal)
+            pendingCompaction = PendingCompaction(reason, estimatedTokens, window, requestBytes, byteBudget, startedAt, decisionId, byteGoal)
             return true
         } catch (failure: AgentModelFailure) {
             val elapsedMs = (compactionSupport.clock() - startedAt).coerceAtLeast(0)
@@ -138,10 +140,15 @@ internal class AgentContextSession(
             byteBudget > 0 && requestBytes > byteBudget.toLong(),
         ), pending?.decisionId)
         pending?.let {
+            val goal = it.byteGoal?.takeIf { goal -> goal.applies }
             logDecision(it.trigger, "compact_done", it.estimatedTokens, it.inputBudget,
                 it.requestBytes, it.byteBudget,
                 elapsedMs = (compactionSupport.clock() - it.startedAt).coerceAtLeast(0),
-                tokensAfter = estimatedTokens, bytesAfter = requestBytes, decisionId = it.decisionId)
+                tokensAfter = estimatedTokens, bytesAfter = requestBytes,
+                byteTargetBytes = goal?.targetBytes,
+                headroomBytes = goal?.headroom(requestBytes),
+                byteTargetStatus = goal?.status(requestBytes),
+                decisionId = it.decisionId)
             pendingCompaction = null
         }
     }
@@ -153,6 +160,7 @@ internal class AgentContextSession(
         logDecision(pending.trigger, "compact_done", pending.estimatedTokens, pending.inputBudget,
             pending.requestBytes, pending.byteBudget, failureCode = code,
             elapsedMs = (compactionSupport.clock() - pending.startedAt).coerceAtLeast(0),
+            byteTargetBytes = pending.byteGoal?.takeIf { it.applies }?.targetBytes,
             decisionId = pending.decisionId)
         pendingCompaction = null
     }
@@ -191,6 +199,9 @@ internal class AgentContextSession(
         elapsedMs: Long? = null,
         tokensAfter: Int? = null,
         bytesAfter: Long? = null,
+        byteTargetBytes: Long? = null,
+        headroomBytes: Long? = null,
+        byteTargetStatus: String? = null,
         decisionId: String? = null,
     ) {
         emit(AgentBudgetTelemetry.line(
@@ -205,6 +216,9 @@ internal class AgentContextSession(
             elapsedMs = elapsedMs,
             tokensAfter = tokensAfter,
             bytesAfter = bytesAfter,
+            byteTargetBytes = byteTargetBytes,
+            headroomBytes = headroomBytes,
+            byteTargetStatus = byteTargetStatus,
             decisionId = decisionId,
         ))
     }
@@ -242,7 +256,8 @@ internal class AgentContextSession(
         )
     }
 
-    fun compact(force: Boolean = false, final: Boolean = false, reasonCode: String = "") {
+    fun compact(force: Boolean = false, final: Boolean = false, reasonCode: String = "",
+        byteGoal: AgentByteCompactionGoal? = null) {
 
         val before = inputTokens
         if (AnthropicEphemeralState.hasPendingToolResponse(messages)) {
@@ -283,11 +298,19 @@ internal class AgentContextSession(
                     onEvent(AgentEvent.ContextCompaction(operation, AgentEvent.ContextCompaction.PHASE_PROGRESS, before,
                         completedSlices = completedSlices.get(), elapsedMs = (compactionSupport.clock() - compactionStarted).coerceAtLeast(0),
                         activity = activity))
-                }, candidateFits = { candidate ->
+                }, candidateVerdict = { candidate ->
                     val budget = AgentRequestBudget.evaluate(config, projectRequest(candidate), requestTools(), requestPurpose)
                     val inputLimit = AgentContextBudget.inputBudget(config, requestPurpose)
-                    (inputLimit == null || budget.estimatedTokens <= inputLimit * 0.80) &&
-                        (requestByteBudget() == 0 || budget.requestBytes <= requestByteBudget())
+                    val tokenOk = inputLimit == null || budget.estimatedTokens <= inputLimit * 0.80
+                    val byteBudget = requestByteBudget()
+                    when {
+                        !tokenOk -> AgentCandidateVerdict.reject(budget.requestBytes)
+                        byteBudget == 0 -> AgentCandidateVerdict.stop(budget.requestBytes)
+                        budget.requestBytes > byteBudget -> AgentCandidateVerdict.reject(budget.requestBytes)
+                        byteGoal?.targetBytes != null && budget.requestBytes > byteGoal.targetBytes ->
+                            AgentCandidateVerdict.retain(budget.requestBytes)
+                        else -> AgentCandidateVerdict.stop(budget.requestBytes)
+                    }
                 })
             val candidate = compactor.compact(
                 messages, systemCount, sensitiveIds(),
