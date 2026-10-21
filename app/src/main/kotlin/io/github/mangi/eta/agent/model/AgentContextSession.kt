@@ -35,6 +35,9 @@ internal class AgentContextSession(
     }
     private var committedSnapshot: AgentContextSnapshot? = null
     private var pendingCompaction: PendingCompaction? = null
+    // A failed soft byte optimization must not run again after every completed tool.
+    // Run-local only: a new user turn, successful compaction or new run gets another chance.
+    private var byteCompactionDeferred = false
 
     private data class PendingCompaction(
         val trigger: String,
@@ -74,6 +77,12 @@ internal class AgentContextSession(
             compact()
             return false
         }
+        if (reason == "bytes" && byteCompactionDeferred) {
+            publishSnapshot()
+            logDecision(reason, "deferred", estimatedTokens, window, requestBytes, byteBudget,
+                failureCode = "BYTE_SUMMARY_FAILED_THIS_TURN", decisionId = decisionId)
+            return false
+        }
         val startedAt = compactionSupport.clock()
         try {
             compact(force = true, reasonCode = when (reason) {
@@ -88,6 +97,7 @@ internal class AgentContextSession(
             // An estimate is not evidence of overflow. An unavailable/unhelpful summary
             // leaves the exact original request intact for the provider to decide.
             if (failure.code in SOFT_COMPACTION_FAILURES) {
+                if (reason == "bytes") byteCompactionDeferred = true
                 logDecision(reason, "soft_noop", estimatedTokens, window, requestBytes, byteBudget,
                     failureCode = failure.code, elapsedMs = elapsedMs, decisionId = decisionId)
                 logLegacyFallback("send_original", reason, failure.code, requestBytes, byteBudget)
@@ -98,6 +108,7 @@ internal class AgentContextSession(
             // request. Cancellation escapes as AgentRunCancelledException, and unknown or
             // storage-related failures still propagate, so new failure codes fail closed.
             if (reason == "bytes" && byteFallbackEligible(failure)) {
+                byteCompactionDeferred = true
                 logDecision(reason, "fallback", estimatedTokens, window, requestBytes, byteBudget,
                     failureCode = failure.code, elapsedMs = elapsedMs, decisionId = decisionId)
                 logLegacyFallback("send_original_after_summary_failure", reason, failure.code, requestBytes, byteBudget)
@@ -206,6 +217,7 @@ internal class AgentContextSession(
     }
 
     fun userAppended() {
+        byteCompactionDeferred = false
         consumedUserTurns++
         consumedSupplementCount++
     }
@@ -292,6 +304,7 @@ internal class AgentContextSession(
             while (messages.length() > 0) messages.remove(messages.length() - 1)
             for (index in 0 until candidate.length()) messages.put(candidate.getJSONObject(index))
             inputTokens = null
+            byteCompactionDeferred = false
             compactor.clearCompletedCheckpoint()
             onEvent(AgentEvent.ContextCompaction(operation, AgentEvent.ContextCompaction.PHASE_COMPLETED, before,
                 reasonCode = reasonCode))

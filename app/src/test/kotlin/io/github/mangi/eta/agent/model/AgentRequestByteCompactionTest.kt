@@ -9,6 +9,48 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class AgentRequestByteCompactionTest {
+    @Test fun byteFailureIsNotRetriedAfterEachCompletedToolButNewUserTurnCanRetry() {
+        val current = config.copy(requestByteBudget = 16_000)
+        val messages = messages(20_000)
+        val original = messages.toString()
+        var summaries = 0
+        val server = provider { summaries++; throw AgentModelFailure("CONTEXT_SUMMARY_INVALID", false, "fixture") }
+        val active = session(current, messages, server = server)
+        assertFalse(active.prepareForRequest(100, 30_000))
+        val attempts = summaries
+        assertTrue(attempts > 0)
+        repeat(4) { i ->
+            messages.put(toolCall("done-$i"))
+                .put(JSONObject().put("role", "tool").put("tool_call_id", "done-$i").put("content", "completed result"))
+            assertFalse(active.prepareForRequest(100, 31_000L + i))
+        }
+        assertEquals(attempts, summaries)
+        assertEquals(original, JSONArray().also { for (i in 0 until 3) it.put(messages.getJSONObject(i)) }.toString())
+        active.userAppended()
+        assertFalse(active.prepareForRequest(100, 40_000))
+        assertTrue(summaries > attempts)
+        val afterUser = summaries
+        val nextRun = session(current, messages, server = server)
+        assertFalse(nextRun.prepareForRequest(100, 40_000))
+        assertTrue(summaries > afterUser)
+    }
+
+    @Test fun deferredByteFailureNeverSuppressesTokenPressureOrManualCompaction() {
+        val messages = messages(20_000)
+        var summaries = 0
+        val active = session(config.copy(requestByteBudget = 16_000), messages, server = provider {
+            summaries++; throw AgentModelFailure("CONTEXT_SUMMARY_INVALID", false, "fixture")
+        })
+        assertFalse(active.prepareForRequest(100, 30_000))
+        val first = summaries
+        assertThrows(AgentModelFailure::class.java) { active.prepareForRequest(900_000, 30_000) }
+        assertTrue(summaries > first)
+        val afterToken = summaries
+        assertThrows(AgentModelFailure::class.java) { active.compact(force = true) }
+        assertTrue(summaries > afterToken)
+        assertNull(active.snapshot())
+    }
+
     private val config = AgentModelClient.ModelConfig(
         baseUrl = "https://example.invalid", apiKey = "fixture", model = "fixture", systemPrompt = "fixed",
         contextWindow = 960_000,

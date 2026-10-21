@@ -10,6 +10,40 @@ import org.junit.Test
 import java.nio.file.Files
 
 class AgentHierarchicalCompactionTest {
+    @Test fun leafFactCountRepairIsSpecificAndRetainsSameSourceWithoutTruncation() {
+        for (count in listOf(0, 17)) {
+            val fake = Fake().apply {
+                transform = { body, leaf -> if (leaf && leaves == 1) body.put("facts", JSONArray().also { facts ->
+                    repeat(count) { facts.put(JSONObject().put("section", "confirmed").put("text", "fixture-$it")) }
+                }) }
+            }
+            val events = mutableListOf<AgentEvent>()
+            AgentContextSummarizer(config, fake, AgentRunController(), false, events::add,
+                support = AgentCompactionSupport(hierarchical = true)).summarize(history(1))
+            assertEquals(2, fake.leaves)
+            val leaves = fake.requests.filter { JSONObject(it.messages.getJSONObject(1).getString("content")).has("history_data") }
+            assertEquals(leaves[0].messages.getJSONObject(1).toString(), leaves[1].messages.getJSONObject(1).toString())
+            assertTrue(leaves[1].messages.getJSONObject(0).getString("content").contains("返回${count}条"))
+            assertTrue(leaves[1].messages.getJSONObject(0).getString("content").contains("不要机械截断"))
+            val diagnostic = JSONObject(events.filterIsInstance<AgentEvent.ModelRetryScheduled>().single().diagnosticJson!!)
+            assertEquals(count, diagnostic.getInt("summary_fact_count"))
+            assertEquals("fact_count", diagnostic.getString("summary_structure_reason"))
+        }
+    }
+
+    @Test fun repeatedExcessFactsStillFailAndNeverPublishUnverifiedCheckpoint() {
+        val fake = Fake().apply { transform = { body, leaf -> if (leaf) body.put("facts", JSONArray().also { a ->
+            repeat(17) { a.put(JSONObject().put("section", "confirmed").put("text", "fixture")) }
+        }) } }
+        val store = Store()
+        assertThrows(AgentModelFailure::class.java) {
+            AgentContextSummarizer(config, fake, AgentRunController(), false,
+                support = AgentCompactionSupport(hierarchical = true, treeStore = store)).summarize(history(1))
+        }
+        assertEquals(2, fake.leaves)
+        assertTrue(store.values.isEmpty())
+    }
+
     @Test fun verifiedCheckpointCanCommitWithoutModelWhenFinalRequestFits() {
         val source = history(12)
         val store = Store()

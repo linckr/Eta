@@ -282,7 +282,7 @@ internal class AgentHierarchicalCompaction(
         summaryRequire(node.getString("source") == id, "source")
         summaryRequire(node.keys().asSequence().all { it in setOf("schema", "source", "facts", "start", "end", "journal_ids") }, "fields")
         val facts = node.getJSONArray("facts")
-        summaryRequire(facts.length() in 1..16, "fact_count")
+        if (facts.length() !in 1..16) throw AgentSummaryValidation("fact_count", factCount = facts.length())
         var textChars = 0
         for (i in 0 until facts.length()) {
             val fact = facts.getJSONObject(i)
@@ -298,6 +298,12 @@ internal class AgentHierarchicalCompaction(
     private fun fieldRepair(raw: String?): String {
         val safe = io.github.mangi.eta.agent.runtime.ModelFailureDiagnostic.sanitize(raw) ?: return ""
         val details = JSONObject(safe)
+        if (details.optString("summary_structure_reason") == "fact_count" && details.optString("summary_validation") == "leaf") {
+            val count = details.optInt("summary_fact_count", -1).takeIf { it >= 0 }
+            return "上次facts条数不合规" + (count?.let { "（返回${it}条）" } ?: "") +
+                "。必须重新归纳为1至16条，每条text最多600字符，全部text合计最多4000字符。" +
+                "合并相关事实，保留目标、约束、关键结果和未决事项；不要机械截断或遗漏关键事实。输出前数清facts数组长度。"
+        }
         val scope = details.optString("summary_field_scope")
         val expected = when (scope) {
             "patch" -> "顶层只能包含schema、base_revision、add、update、remove；必须返回增量补丁，不得返回memory的revision/facts快照。"
@@ -337,6 +343,7 @@ internal class AgentHierarchicalCompaction(
         }
         val fieldDetail = if (reason == "fields" && detail != null) " ${detail.fieldsDescription()}。" else ""
         val diagnostic = JSONObject().put("purpose", "compaction").put("summary_validation", stage).put("summary_structure_reason", reason)
+        detail?.factCount?.let { diagnostic.put("summary_fact_count", it) }
         if (reason == "fields" && detail != null) {
             diagnostic.put("summary_field_scope", detail.scope)
                 .put("summary_missing_fields", JSONArray(detail.missing.sorted()))

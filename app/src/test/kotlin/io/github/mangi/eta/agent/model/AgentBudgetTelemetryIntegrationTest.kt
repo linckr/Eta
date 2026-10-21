@@ -157,6 +157,46 @@ class AgentBudgetTelemetryIntegrationTest {
         assertEquals(0, legacyLines().size)
     }
 
+    @Test fun byteFailureDefersNextByteRoundWithoutNewAttemptUntilUserTurns() {
+        var summaries = 0
+        val active = AgentContextSession(
+            config = baseConfig.copy(requestByteBudget = 16_000),
+            messages = messages(20_000),
+            systemCount = 1,
+            operationId = "telemetry-fixture",
+            provider = provider { request ->
+                if (request.purpose == ProviderRequestPurpose.COMPACTION) {
+                    summaries++
+                    throw AgentModelFailure("CONTEXT_SUMMARY_TIMEOUT", false, "fixture")
+                }
+                response("complete")
+            },
+            runController = AgentRunController(),
+            sensitiveIds = { emptySet() },
+            onContextSnapshot = {},
+            onBudgetLog = collector::add,
+        )
+
+        assertFalse(active.prepareForRequest(100, 20_000))
+        assertEquals(1, summaries)
+        assertFalse(active.prepareForRequest(100, 21_000))
+        assertEquals(1, summaries)
+
+        assertEquals(2, budgetLines("pre"))
+        val deferred = decisions("deferred")
+        assertEquals(1, deferred.size)
+        assertEquals("BYTE_SUMMARY_FAILED_THIS_TURN", deferred.single()["code"])
+        assertEquals(preDecisionIds()[1], deferred.single()["decision_id"])
+        assertEquals(1, decisions("fallback").size)
+        assertEquals(1, terminalEntries().size)
+
+        active.userAppended()
+        assertFalse(active.prepareForRequest(100, 22_000))
+        assertEquals(2, summaries)
+        assertEquals(2, decisions("fallback").size)
+        assertEquals(2, terminalEntries().size)
+    }
+
     @Test fun cancellationEndsTheAttemptWithRunCancelledAndPropagates() {
         val controller = AgentRunController()
         val messages = messages(20_000)
@@ -223,6 +263,11 @@ class AgentBudgetTelemetryIntegrationTest {
 
     private fun preDecisionId(): String =
         fields(collected("context_request_budget").first { fields(it)["phase"] == "pre" }).getValue("decision_id")
+
+    private fun preDecisionIds(): List<String> =
+        collected("context_request_budget")
+            .filter { fields(it)["phase"] == "pre" }
+            .map { fields(it).getValue("decision_id") }
 
     private fun legacyFallbackLines(action: String) =
         collected("context_request_budget_fallback").count { fields(it)["action"] == action }

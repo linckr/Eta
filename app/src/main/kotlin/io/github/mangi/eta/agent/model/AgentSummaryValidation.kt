@@ -6,6 +6,7 @@ internal class AgentSummaryValidation(
     val scope: String? = null,
     val missing: Set<String> = emptySet(),
     val extraCount: Int = 0,
+    val factCount: Int? = null,
 ) : IllegalArgumentException("Invalid summary: $reason") {
     fun fieldsDescription(): String = buildString {
         append(when (scope) { "bound_patch" -> "有序增量对象"; "bound_delta" -> "区间增量"; "bound_fact" -> "区间增量事实"; "patch" -> "增量对象"; "fact" -> "增量事实"; "leaf" -> "区间对象"; "leaf_fact" -> "区间事实"; else -> "对象" })

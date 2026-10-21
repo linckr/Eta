@@ -10,7 +10,8 @@ Protocol (emitted by AgentContextSession):
   context_budget_decision purpose=chat trigger=bytes|token|both essential=...
       action=compact_done|fallback|soft_noop|hard_failure|deferred ...
       One terminal line per actual compaction attempt (with duration_ms), or one
-      deferred line when the signed tool round blocks compaction (not an attempt).
+      deferred line when the signed tool round blocks compaction, or when a byte-only
+          summary already failed in the same user turn (not an attempt).
   context_request_budget_fallback ... (legacy P0 mirror; ignored for counting)
 
 Metric definitions:
@@ -20,7 +21,8 @@ Metric definitions:
   byte_only_per_100_rounds          byte_only_attempts / chat_rounds * 100
   byte_only_wait_ms                 sum of duration_ms over byte-only terminal attempts
   byte_only_wait_ms_per_100_rounds  byte_only_wait_ms / chat_rounds * 100
-  deferred_rounds                   rounds where signed Anthropic tool state deferred compaction
+  deferred_rounds                   rounds deferred without an attempt (signed tool state or a
+                                  byte-only summary already failed in this user turn)
   fallback_rounds                   attempts that fell back to sending the original request
 
 decision_id deduplicates both pre-request rounds and terminal decisions across merged captures.

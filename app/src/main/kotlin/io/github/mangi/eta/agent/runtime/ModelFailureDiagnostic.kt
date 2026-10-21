@@ -38,6 +38,10 @@ internal object ModelFailureDiagnostic {
         }
         (source.opt("summary_extra_field_count") as? Number)?.toInt()?.takeIf { it in 0..24_000 }
             ?.let { safe.put("summary_extra_field_count", it) }
+        (source.opt("summary_fact_count") as? Number)?.let { number ->
+            number.toInt().takeIf { it in 0..24_000 && number.toDouble() == it.toDouble() }
+                ?.let { safe.put("summary_fact_count", it) }
+        }
         source.optString("client_phase").takeIf { it in phases }?.let { safe.put("client_phase", it) }
         (source.opt("trusted_gateway_ingress") as? Boolean)?.let { safe.put("trusted_gateway_ingress", it) }
         source.optString("trace_id").takeIf(::validTrace)?.let { safe.put("trace_id", it) }
