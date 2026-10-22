@@ -1,0 +1,9 @@
+// Keep Robolectric SDK 33 and 36 in separate workers to avoid native font-loader collisions.
+// Invoke once per SDK: -PetaTestSdk=36 --init-script scripts/compaction_v4_single_sdk.init.gradle
+gradle.projectsEvaluated {
+    def chosenSdk = gradle.startParameter.projectProperties['etaTestSdk']
+    if (!(chosenSdk in ['33', '36'])) throw new GradleException('Choose etaTestSdk=33 or 36')
+    gradle.rootProject.project(':app').tasks.withType(org.gradle.api.tasks.testing.Test).configureEach {
+        systemProperty 'robolectric.enabledSdks', chosenSdk
+    }
+}
