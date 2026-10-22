@@ -62,7 +62,8 @@ internal object AnthropicMessagesProvider : AgentProviderClient {
             .apply { trace.attach(this) }
             .build()
 
-        val call = AgentHttpClient.modelClient(request.purpose, request.freshConnection).newCall(httpRequest)
+        val guarded = AgentOneShotHttp.prepare(request, httpRequest)
+        val call = AgentOneShotHttp.client(AgentHttpClient.modelClient(request.purpose, request.freshConnection), request.oneShotAttempt).newCall(guarded)
         val binding = runController.register { call.cancel() }
         try {
             runController.throwIfCancelled()

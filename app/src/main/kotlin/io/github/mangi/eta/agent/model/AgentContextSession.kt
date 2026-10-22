@@ -68,6 +68,21 @@ internal class AgentContextSession(
 
     fun snapshot(): AgentContextSnapshot? = committedSnapshot
 
+    /** Publish the exact durable context before waiting; never mark it compacted. */
+    fun preserveForRecovery() {
+        val snapshot = createSnapshot(messages)
+        snapshot.encode()
+        onContextSnapshot(snapshot)
+        committedSnapshot = snapshot
+    }
+
+    fun hasTokenPressure(estimated: Int): Boolean = contextWindow?.let { window ->
+        AgentCompactionTokenPolicy.triggered(estimated, window) ||
+            inputTokens?.let { AgentCompactionTokenPolicy.triggered(it, window) } == true
+    } == true
+
+    fun knownRecoveryFailureCode(): String? = knownFailure?.failureCode
+
     fun observeInputTokens(tokens: Int?) {
         inputTokens = tokens?.takeIf { it >= 0 }
     }

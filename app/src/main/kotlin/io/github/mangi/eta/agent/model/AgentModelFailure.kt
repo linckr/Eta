@@ -48,7 +48,8 @@ internal class AgentModelFailure(
     }
 
     fun copyFailure(retryable: Boolean = this.retryable, message: String = this.message.orEmpty(),
-        contextRecoveryAllowed: Boolean = this.contextRecoveryAllowed, diagnosticJson: String? = this.diagnosticJson): AgentModelFailure =
+        contextRecoveryAllowed: Boolean = this.contextRecoveryAllowed, diagnosticJson: String? = this.diagnosticJson,
+        receiveRetryAllowed: Boolean = this.receiveRetryAllowed): AgentModelFailure =
         AgentModelFailure(code, retryable, message, this, contextRecoveryAllowed, diagnosticJson, receiveRetryAllowed)
 
     companion object {

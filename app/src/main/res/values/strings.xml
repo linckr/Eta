@@ -1517,4 +1517,23 @@
   <string name="settings_compaction_model_route">To create summaries, conversation history is sent to the selected model and its provider. Chat keeps its current model. Follow the conversation to restore the default route.</string>
   <string name="tool_protocol_rejected_expand">Invalid tool format blocked (show original reply)</string>
   <string name="tool_protocol_rejected_collapse">Invalid tool format blocked (hide original reply)</string>
+    <string name="context_recovery_title">Context recovery</string>
+    <string name="context_recovery_checkpoint">Verified checkpoint: %1$s</string>
+    <string name="context_recovery_unverified">Not verified / unavailable</string>
+    <string name="context_recovery_preserved">Original history and completed tool results are retained.</string>
+    <string name="context_recovery_consumed">This permission has been consumed. Completion is not confirmed; another upload requires confirmation, including authentication refresh or a failure before body upload.</string>
+    <string name="context_recovery_expired">Decision expired. Rebuild and confirm again; tool results are retained.</string>
+    <string name="context_recovery_send_once">Only send this request (1 attempt)</string>
+    <string name="context_recovery_continue">Continue compression</string>
+    <string name="context_recovery_retry">Retry compression</string>
+    <string name="context_recovery_stop">Stop</string>
+    <string name="context_recovery_unknown">Unknown</string>
+    <string name="context_recovery_tokens">Estimated input: %1$s / %2$s</string>
+    <string name="context_recovery_confirm">Confirm exactly one HTTP attempt for this request. Upload may fail. This does not increase L, bypass H or token checks, repeat tools, or authorize retries. Redirects, authentication refresh and connection recovery require new confirmation.</string>
+    <string name="context_recovery_back">Back</string>
+    <string name="context_recovery_disconnected">Cannot confirm the decision. Reconnect and check its state; no new permission was granted.</string>
+    <string name="context_recovery_legacy_warning">v4 uses a new summary format. Old segmented/tree progress (including 270-segment checkpoints) is retained but is not imported automatically; history may be processed again. Complete existing work with the original engine first if needed.</string>
+    <string name="context_recovery_enable_v4">Enable v4</string>
+    <string name="context_recovery_headroom" formatted="false">Capacity checks may pass at 80% of the input budget while further content can trigger compression again. 60% is a headroom target, not an unconditional promise of 10 turns.</string>
+    <string name="context_recovery_manual_only">Compress the current conversation only; do not resend the original task.</string>
 </resources>

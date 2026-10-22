@@ -83,6 +83,7 @@ internal class AgentRunMessageProjector(
             ensureCompletedThinking(runId, event.round, event.reasoningContent, messages)
         }
         is AgentEvent.RunFinished -> finalizeText(runId, finalizeThinking(runId, messages))
+        is AgentEvent.ContextRecovery,
         is AgentEvent.ModelIdentityObserved,
         is AgentEvent.UserSupplementReceived,
         is AgentEvent.RunStarted,

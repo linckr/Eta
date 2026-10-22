@@ -18,6 +18,9 @@ internal object CodexResponsesProvider : AgentProviderClient {
         runController: AgentRunController,
         onEvent: (ProviderEvent) -> Unit,
     ): ProviderResponse {
+        // Legacy adapter rewrites auth/body after preparation; it cannot consume an exact-body lease.
+        if (request.oneShotAttempt != null) throw AgentModelFailure("MODEL_ONE_SHOT_LEGACY_ADAPTER", false,
+            "请使用当前订阅连接入口重新确认本次发送；旧适配器不支持单次许可。", contextRecoveryAllowed = false)
         val sourceConfig = request.effectiveConfig
         require(sourceConfig.openAiEndpointMode == OpenAiEndpointMode.RESPONSES) {
             "当前 OpenAI Codex Provider 未配置为 Responses API"

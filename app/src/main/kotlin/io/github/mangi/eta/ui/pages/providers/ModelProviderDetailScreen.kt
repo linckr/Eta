@@ -193,6 +193,19 @@ private fun ProviderConfigTab(
     onCreated: (String) -> Unit,
     onDeleted: () -> Unit,
 ) {
+    var confirmV4 by remember(provider.id) { mutableStateOf(false) }
+    io.github.mangi.eta.ui.components.EtaWindowDialog(
+        show = confirmV4,
+        title = stringResource(R.string.context_recovery_enable_v4),
+        summary = stringResource(R.string.context_recovery_legacy_warning),
+        onDismissRequest = { confirmV4 = false },
+    ) {
+        EtaTextButton(stringResource(R.string.context_recovery_enable_v4), {
+            confirmV4 = false
+            onDraftChange(draft.copy(sendPolicyEnabled = true))
+        })
+        EtaTextButton(stringResource(R.string.context_recovery_back), { confirmV4 = false })
+    }
     val context = LocalContext.current
     var headersExpanded by rememberSaveable { mutableStateOf(false) }
     var status by remember { mutableStateOf<String?>(null) }
@@ -343,9 +356,11 @@ private fun ProviderConfigTab(
                 EtaSwitchPreference(
                     title = "启用此服务商路由的发送边界",
                     checked = draft.sendPolicyEnabled,
-                    onCheckedChange = { onDraftChange(draft.copy(sendPolicyEnabled = it)) },
+                    onCheckedChange = { if (it) confirmV4 = true else onDraftChange(draft.copy(sendPolicyEnabled = false)) },
                 )
                 Column(modifier = Modifier.padding(16.dp)) {
+                    Text(stringResource(R.string.context_recovery_legacy_warning), style = MiuixTheme.textStyles.footnote2)
+                    Text(stringResource(R.string.context_recovery_headroom), style = MiuixTheme.textStyles.footnote2)
                     Text(
                         text = "默认关闭，保留旧策略。启用后，原请求大小软预算 B 仍独立触发压缩；B 留空不再派生字节压缩线。发送边界 L 只限制自动发送，不代表接口保证。适用于此服务商全部模型；模型自定义请求头或请求体时不启用。修改地址、协议、凭据或请求覆盖会使旧边界失效，需重新开启保存。",
                         style = MiuixTheme.textStyles.footnote2,

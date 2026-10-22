@@ -265,6 +265,16 @@ internal class AgentRuntimeRunExecutor(
                     }
                 }
             }
+            runController.recoveryConfigurationStamp = {
+                runBlocking {
+                    val provider = io.github.mangi.eta.data.repository.ProviderRepository.providerById(request.config.providerId)
+                    val settings = io.github.mangi.eta.data.datastore.SettingsDataStore.settings()
+                    val conversationModel = conversationId?.let { EtaDatabase.get(appContext).conversationDao().conversationMetadataRow(it)?.modelId }
+                    provider?.toString().orEmpty() + "|" + settings.compactionModelId + "|" + conversationModel + "|" +
+                        io.github.mangi.eta.data.repository.ProviderRepository.allProviders().toString() + "|" +
+                        io.github.mangi.eta.config.Prefs.isEnabled(io.github.mangi.eta.config.Prefs.Keys.AGENT_AUTO_COMPACTION_ENABLED)
+                }
+            }
             val completedResponse = AgentModelClient.complete(
                 config = request.config,
                 sessionId = request.effectiveModelSessionId,

@@ -34,6 +34,8 @@ import kotlinx.serialization.json.Json
  * 不引入 AIDL：结构化字段使用 [Bundle]，图片正文使用 [ParcelFileDescriptor]，避免占用 Binder 事务缓冲区。
  */
 internal object AgentRuntimeWire {
+    const val MSG_CONTEXT_RECOVERY = 16
+    const val MSG_CONTEXT_RECOVERY_ACK = 17
     const val MSG_READ_CONTEXT_RESULT = 15
     const val OP_CHAT = "chat"
     const val OP_COMPACT = "compact"
@@ -711,6 +713,10 @@ internal object AgentRuntimeWire {
     /** 将 [AgentEvent] 打包为可跨进程传递的 [Bundle]。 */
     fun eventToBundle(event: AgentEvent): Bundle = Bundle().apply {
         when (event) {
+            is AgentEvent.ContextRecovery -> {
+                putString(KEY_TYPE, "context_recovery")
+                putString("recovery_json", recoveryToJson(event.decision).toString())
+            }
             is AgentEvent.RunStarted -> {
                 putString(KEY_TYPE, "run_started")
                 putInt("initial_images", event.initialImages)
@@ -879,6 +885,9 @@ internal object AgentRuntimeWire {
 
     /** 将 [Bundle] 还原为 [AgentEvent]，无法识别时返回 null。 */
     fun eventFromBundle(bundle: Bundle): AgentEvent? = when (bundle.getString(KEY_TYPE)) {
+        "context_recovery" -> runCatching {
+            AgentEvent.ContextRecovery(recoveryFromJson(org.json.JSONObject(bundle.getString("recovery_json").orEmpty())))
+        }.getOrNull()
         "run_started" -> AgentEvent.RunStarted(
             initialImages = bundle.getInt("initial_images"),
             initialImageBytes = bundle.getInt("initial_image_bytes"),
@@ -1063,6 +1072,26 @@ internal object AgentRuntimeWire {
     private fun decodeCustomHeaders(raw: String?): List<CustomHeader> =
         if (raw.isNullOrBlank()) emptyList()
         else runCatching { json.decodeFromString<List<CustomHeader>>(raw) }.getOrDefault(emptyList())
+
+    fun recoveryToJson(d: ContextRecoveryDecision) = org.json.JSONObject().apply {
+        put("runId", d.runId); put("requestId", d.requestId); put("nonce", d.nonce); put("revision", d.revision)
+        put("phase", d.phase); put("reasonCode", d.reasonCode); put("detail", d.detail); put("stage", d.stage)
+        put("permitAvailable", d.permitAvailable); put("permitUnavailableReason", d.permitUnavailableReason)
+        put("requestBytes", d.requestBytes); put("sendLimitBytes", d.sendLimitBytes); d.hardLimitBytes?.let { put("hardLimitBytes", it) }
+        put("estimatedTokens", d.estimatedTokens); d.inputLimit?.let { put("inputLimit", it) }
+        put("providerLabel", d.providerLabel); put("modelLabel", d.modelLabel); d.completedSlices?.let { put("completedSlices", it) }
+    }
+
+    fun recoveryFromJson(j: org.json.JSONObject) = ContextRecoveryDecision(
+        runId = j.getString("runId"), requestId = j.getString("requestId"), nonce = j.optString("nonce"), revision = j.getLong("revision"),
+        phase = j.getString("phase"), reasonCode = j.getString("reasonCode"), detail = j.getString("detail"), stage = j.optString("stage", "pre_send"),
+        permitAvailable = j.optBoolean("permitAvailable"), permitUnavailableReason = j.optString("permitUnavailableReason"),
+        requestBytes = j.getLong("requestBytes"), sendLimitBytes = j.getLong("sendLimitBytes"),
+        hardLimitBytes = if (j.has("hardLimitBytes")) j.getLong("hardLimitBytes") else null,
+        estimatedTokens = j.getInt("estimatedTokens"), inputLimit = if (j.has("inputLimit")) j.getInt("inputLimit") else null,
+        providerLabel = j.optString("providerLabel"), modelLabel = j.optString("modelLabel"),
+        completedSlices = if (j.has("completedSlices")) j.getInt("completedSlices") else null,
+    )
 
     private fun decodeCustomBody(raw: String?): List<CustomBody> =
         if (raw.isNullOrBlank()) emptyList()

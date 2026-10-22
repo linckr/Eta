@@ -5,6 +5,10 @@ import io.github.mangi.eta.core.toSafeLogToken
 internal sealed interface AgentEvent {
     fun toLogLine(): String
 
+    data class ContextRecovery(val decision: ContextRecoveryDecision) : AgentEvent {
+        override fun toLogLine(): String = "context_recovery phase=${decision.phase}, code=${decision.reasonCode.toSafeLogToken()}, bytes=${decision.requestBytes}"
+    }
+
     enum class AssistantBlockKind {
         TEXT,
         THINKING,

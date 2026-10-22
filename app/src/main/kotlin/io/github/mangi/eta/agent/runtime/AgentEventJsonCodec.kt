@@ -7,7 +7,8 @@ import org.json.JSONObject
 /** Runtime 事件的稳定 JSON 投影；只编码 IPC 已公开的安全字段。 */
 internal object AgentEventJsonCodec {
     fun encode(event: AgentEvent): String = bundleToJson(
-        AgentRuntimeWire.eventToBundle(event)
+        AgentRuntimeWire.eventToBundle(if (event is AgentEvent.ContextRecovery)
+            event.copy(decision = event.decision.copy(nonce = "", permitAvailable = false, phase = if (event.decision.phase in setOf("waiting", "resolved", "consumed")) "interrupted" else event.decision.phase)) else event)
     ).also { json ->
         // Archive the actual phase; only the live IPC uses legacy started for progress.
         if (event is AgentEvent.ContextCompaction) json.put("phase", event.phase)

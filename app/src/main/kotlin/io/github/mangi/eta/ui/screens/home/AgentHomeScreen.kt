@@ -32,6 +32,8 @@ internal fun AgentHomeScreen(
     conversationLoadFailed: Boolean = false,
     historyLoadState: ConversationHistoryLoadState = ConversationHistoryLoadState.Idle,
     isDrawerOpen: Boolean = false,
+    contextRecovery: io.github.mangi.eta.ui.model.ContextRecoveryUi? = null,
+    onContextRecovery: (String, String) -> Unit = { _, _ -> },
     modifier: Modifier = Modifier,
 ) {
     // key 内保持完整分支，避免提前返回遗留无法转换为 DEX 的编译器标记。
@@ -45,6 +47,18 @@ internal fun AgentHomeScreen(
             )
         } else {
             CompositionLocalProvider(LocalRoleplayChat provides state.roleplayChatUi()) {
+                androidx.compose.foundation.layout.Column(modifier) {
+                contextRecovery?.let { io.github.mangi.eta.ui.components.ContextRecoveryCard(it, onContextRecovery) }
+                if (contextRecovery == null && state.canCompactContext && state.messages.takeLast(4).any {
+                    it is io.github.mangi.eta.ui.model.SystemNoticeMessageUi &&
+                        it.diagnosticJson?.contains("CONTEXT_") == true
+                }) {
+                    io.github.mangi.eta.ui.components.EtaTextButton(
+                        text = androidx.compose.ui.res.stringResource(io.github.mangi.eta.R.string.context_recovery_retry),
+                        onClick = { onAction(AgentHomeAction.CompactContext) },
+                    )
+                    top.yukonga.miuix.kmp.basic.Text(androidx.compose.ui.res.stringResource(io.github.mangi.eta.R.string.context_recovery_manual_only))
+                }
                 AgentChatBody(
                     messages = state.messages,
                     modelPickerState = modelPickerState,
@@ -94,8 +108,9 @@ internal fun AgentHomeScreen(
                     onLoadEarlierMessages = { onAction(AgentHomeAction.LoadEarlierMessages) },
                     onHistoryViewportChanged = { onAction(AgentHomeAction.HistoryViewportChanged(it)) },
                     isDrawerOpen = isDrawerOpen,
-                    modifier = modifier,
+                    modifier = Modifier.weight(1f),
                 )
+                }
             }
         }
     }

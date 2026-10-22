@@ -367,6 +367,8 @@ fun AgentAppRoot(
                 RoutedShell(route = AppRoute.Home) {
                     AgentHomeScreen(
                         state = agentState.homeState,
+                        contextRecovery = agentState.contextRecovery,
+                        onContextRecovery = agentState::recoverContext,
                         modelPickerState = agentState.modelPickerState,
                         conversationKey = agentState.conversationPaneState.selectedConversationId,
                         composerDraft = agentState.currentComposerDraft(),

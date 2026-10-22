@@ -1425,4 +1425,23 @@
   <string name="settings_compaction_model_route">產生摘要時，會話歷史將傳送給所選模型及其所屬服務商。聊天繼續使用當前模型；選擇跟隨當前會話可恢復預設路由。</string>
   <string name="tool_protocol_rejected_expand">工具格式異常，已攔截（展開原始回覆）</string>
   <string name="tool_protocol_rejected_collapse">工具格式異常，已攔截（收起原始回覆）</string>
+    <string name="context_recovery_title">上下文復原</string>
+    <string name="context_recovery_checkpoint">已驗證斷點：%1$s</string>
+    <string name="context_recovery_unverified">未驗證／不可用</string>
+    <string name="context_recovery_preserved">原歷史及已完成工具結果已保留。</string>
+    <string name="context_recovery_consumed">本次許可已使用，尚未確認完成。即使本文尚未上傳或需要更新認證，再次上傳仍需重新確認。</string>
+    <string name="context_recovery_expired">決定已過期，請重新建立並確認；工具結果已保留。</string>
+    <string name="context_recovery_send_once">僅傳送這次請求（1 次嘗試）</string>
+    <string name="context_recovery_continue">繼續壓縮</string>
+    <string name="context_recovery_retry">重試壓縮</string>
+    <string name="context_recovery_stop">停止</string>
+    <string name="context_recovery_unknown">未知</string>
+    <string name="context_recovery_tokens">輸入估算：%1$s / %2$s</string>
+    <string name="context_recovery_confirm">確認只對這一確切請求發起一次 HTTP 嘗試。上傳仍可能失敗；不提高 L、不繞過 H 或 token 保護、不重複執行工具、不授權自動重試。重新導向、認證更新及連線復原需要重新確認。</string>
+    <string name="context_recovery_back">返回</string>
+    <string name="context_recovery_disconnected">無法確認決定，請重新連線後核對狀態；未授予新的許可。</string>
+    <string name="context_recovery_legacy_warning">v4 使用新的摘要格式。舊分段／樹狀進度（含 270 段斷點）會保留，但不會自動轉入；首次可能重新整理歷史。如需保留舊進度的續壓路徑，請先用原引擎完成。</string>
+    <string name="context_recovery_enable_v4">開啟 v4</string>
+    <string name="context_recovery_headroom" formatted="false">80% 只表示通過容量校驗，新增內容仍可能再次觸發壓縮。60% 是餘量目標，不是無條件保證 10 輪免壓縮。</string>
+    <string name="context_recovery_manual_only">僅壓縮目前會話，不重新傳送原任務。</string>
 </resources>

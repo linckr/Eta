@@ -63,8 +63,8 @@ internal object OpenAiResponsesProvider : AgentProviderClient {
                 authMode = config.authMode,
                 request = httpRequest,
                 controller = runController,
+                modelRequest = request,
                 prepareAttempt = { outgoing ->
-                    AgentRequestSendPolicy.requireAllowed(config, outgoing.body?.contentLength() ?: 0)
                     trace = ModelHttpTrace(capabilities.endpoint, request.purpose, onPhase = request.onTransportPhase)
                     observedEvents = trace.providerEvents(onEvent)
                     observedEvents(ProviderEvent.RequestStarted)

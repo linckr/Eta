@@ -18,17 +18,19 @@ internal object AuthorizedProviderHttp {
         controller: AgentRunController,
         accessToken: (String, String, AgentRunController, String?) -> String =
             { id, mode, run, rejected -> ProviderCredentialRepository.accessToken(id, mode, run, rejected) },
+        modelRequest: ProviderRequest? = null,
         prepareAttempt: (Request) -> Request = { it },
         onAuthorizationRetry: (Response) -> Unit = {},
         consume: (Response) -> T,
     ): T {
+        val oneShotAttempt = modelRequest?.oneShotAttempt
         val profile = ProviderConnectionProfile.forAuthMode(authMode)
         profile?.requireRequestTarget(request.url)
-        val httpClient = if (profile == null) client else client.newBuilder()
+        val httpClient = AgentOneShotHttp.client(if (profile == null) client else client.newBuilder()
             .followRedirects(false)
             .followSslRedirects(false)
             .retryOnConnectionFailure(false)
-            .build()
+            .build(), oneShotAttempt)
         var rejectedToken: String? = null
         var refreshed = false
         while (true) {
@@ -43,18 +45,20 @@ internal object AuthorizedProviderHttp {
                 }
                 .build()
             // A refreshed authorization is a new physical call, with a fresh trace/guard.
-            val call = httpClient.newCall(prepareAttempt(authorized))
+            val prepared = prepareAttempt(authorized)
+            val guarded = modelRequest?.let { AgentOneShotHttp.prepare(it, prepared) } ?: prepared
+            val call = httpClient.newCall(guarded)
             val binding = controller.register(call::cancel)
             try {
                 controller.throwIfCancelled()
                 call.execute().use { response ->
                     controller.throwIfCancelled()
-                    if (profile != null && response.code == 401 && !refreshed) {
+                    if (profile != null && response.code == 401 && !refreshed && oneShotAttempt == null) {
                         onAuthorizationRetry(response)
                         rejectedToken = token
                         refreshed = true
                     } else {
-                        if (profile != null && response.code == 401) {
+                        if (profile != null && response.code == 401 && oneShotAttempt == null) {
                             val failure = AgentModelFailure.http(response.code, response.peekBody(16_384).string())
                             if (failure.code != "HTTP_401") throw failure
                             throw AgentModelFailure(

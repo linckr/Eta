@@ -1495,4 +1495,23 @@
   <string name="settings_compaction_model_route">生成摘要时，会话历史将发送给所选模型及其所属服务商。聊天继续使用当前模型；选择跟随当前会话可恢复默认路由。</string>
   <string name="tool_protocol_rejected_expand">工具格式异常，已拦截（展开原始回复）</string>
   <string name="tool_protocol_rejected_collapse">工具格式异常，已拦截（收起原始回复）</string>
+    <string name="context_recovery_title">上下文恢复</string>
+    <string name="context_recovery_checkpoint">已验证断点：%1$s</string>
+    <string name="context_recovery_unverified">未验证／不可用</string>
+    <string name="context_recovery_preserved">原历史和已完成工具结果已保留。</string>
+    <string name="context_recovery_consumed">本次许可已使用，尚未确认完成。即使正文尚未上传或需要刷新认证，再次上传仍需重新确认。</string>
+    <string name="context_recovery_expired">决定已过期，请重新构建并确认；工具结果已保留。</string>
+    <string name="context_recovery_send_once">仅发送这次请求（1次尝试）</string>
+    <string name="context_recovery_continue">继续压缩</string>
+    <string name="context_recovery_retry">重试压缩</string>
+    <string name="context_recovery_stop">停止</string>
+    <string name="context_recovery_unknown">未知</string>
+    <string name="context_recovery_tokens">输入估算：%1$s / %2$s</string>
+    <string name="context_recovery_confirm">确认只对这一确切请求发起一次 HTTP 尝试。上传仍可能失败；不提高 L、不绕过 H 或 token 保护、不重复执行工具、不授权自动重试。重定向、认证刷新和连接恢复需要重新确认。</string>
+    <string name="context_recovery_back">返回</string>
+    <string name="context_recovery_disconnected">无法确认决定，请重新连接后核对状态；未授予新的许可。</string>
+    <string name="context_recovery_legacy_warning">v4 使用新的摘要格式。旧分段／树状进度（含 270 段断点）会保留，但不会自动转入；首次可能重新整理历史。如需保留旧进度的续压路径，请先用原引擎完成。</string>
+    <string name="context_recovery_enable_v4">开启 v4</string>
+    <string name="context_recovery_headroom" formatted="false">80% 只表示通过容量校验，新增内容仍可能再次触发压缩。60% 是余量目标，不是无条件保证 10 轮免压缩。</string>
+    <string name="context_recovery_manual_only">仅压缩当前会话，不重新发送原任务。</string>
 </resources>

@@ -9,6 +9,10 @@ import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
 internal class AgentRunController {
+    var recoveryRunId: String = ""
+    val contextRecovery = ContextRecoveryBroker()
+    /** Application owner supplies current persisted route/model/policy identity, never logged. */
+    var recoveryConfigurationStamp: () -> String? = { null }
     private val resources = CopyOnWriteArraySet<CancellableResource>()
 
     @Volatile
@@ -28,6 +32,7 @@ internal class AgentRunController {
         get() = paused
 
     fun cancel() {
+        contextRecovery.cancel()
         lock.withLock {
             cancelled = true
             acceptingSteering = false
@@ -47,7 +52,7 @@ internal class AgentRunController {
         val prompt = text.trim()
         if (prompt.isBlank()) return false
         lock.withLock {
-            if (cancelled || !acceptingSteering) return false
+            if (cancelled || !acceptingSteering || contextRecovery.current != null) return false
             steeringMessages.addLast(prompt)
         }
         return true

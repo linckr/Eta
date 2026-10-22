@@ -30,7 +30,7 @@ internal class AgentModelRetry(
         var freshConnection = false
         while (true) {
             controller.throwIfCancelled()
-            val attemptRequest = if (protocolRecoverySession == request.sessionId &&
+            val attemptRequest = if (request.oneShotAttempt == null && protocolRecoverySession == request.sessionId &&
                 provider.capabilities.endpoint != EndpointKind.ANTHROPIC_MESSAGES) AgentToolProtocolGuard.recoveryRequest(request) else request
             onEvent(AgentEvent.RoundStarted(round, request.messages.length()))
             var hostedToolStarted = false
@@ -43,7 +43,8 @@ internal class AgentModelRetry(
                 if (attemptRequest.config.compactionPolicyVersion >= 4) {
                     val budget = AgentRequestBudget.evaluate(attemptRequest.config,
                         attemptRequest.messages, attemptRequest.tools, attemptRequest.purpose)
-                    AgentRequestSendPolicy.requireAllowed(attemptRequest.config, budget.requestBytes)
+                    if (attemptRequest.oneShotAttempt == null) AgentRequestSendPolicy.requireAllowed(attemptRequest.config, budget.requestBytes)
+                    else attemptRequest.oneShotAttempt.inspect(attemptRequest)
                 }
                 val response = provider.complete(attemptRequest.copy(freshConnection = freshConnection), controller) { event ->
                     if (event is ProviderEvent.BlockDelta && event.delta.isNotEmpty() && event.kind != AssistantBlockKind.TOOL_CALL) visibleOutputStarted = true
@@ -67,14 +68,20 @@ internal class AgentModelRetry(
                     validationFailed = true
                     throw if (failure is AgentModelFailure) response.httpTrace?.failure(failure) ?: failure else failure
                 }
+                request.oneShotAttempt?.finished(true)
                 return Result(round, response)
             } catch (failure: Exception) {
+                request.oneShotAttempt?.finished(false, (failure as? AgentModelFailure)?.code ?: "MODEL_REQUEST_INTERRUPTED")
                 controller.throwIfCancelled()
                 if (callbackFailed || Thread.currentThread().isInterrupted) {
                     if (failure is AgentModelFailure) throw failure.copyFailure(retryable = false, contextRecoveryAllowed = false)
                     throw failure
                 }
                 val classified = (AgentModelFailure.transport(failure) ?: throw failure).let { it.copyFailure(diagnosticJson = it.diagnostic(round)) }
+                if (request.oneShotAttempt != null) throw classified.copyFailure(
+                    retryable = false, receiveRetryAllowed = false, contextRecoveryAllowed = false,
+                    message = classified.message.orEmpty() + " 本次发送未确认完成，许可已使用或失效；如需再次发送，请重新确认。此前工具结果已保留。",
+                )
                 if (hostedToolStarted || visibleOutputStarted && !validationFailed) throw classified.copyFailure(
                     retryable = false, contextRecoveryAllowed = false,
                     message = classified.message.orEmpty() + if (hostedToolStarted)

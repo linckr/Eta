@@ -110,6 +110,37 @@ internal class AgentAppState(
     )
     private val pendingSupplements = mutableMapOf<String, PendingSupplement>()
     private val composerDrafts = AgentChatComposerDrafts()
+    private var recoveryByRun by mutableStateOf<Map<String, io.github.mangi.eta.ui.model.ContextRecoveryUi>>(emptyMap())
+    val contextRecovery: io.github.mangi.eta.ui.model.ContextRecoveryUi?
+        get() = recoveryByRun.values.lastOrNull { runConversationIds[it.decision.runId] == selectedConversationId }
+
+    fun recoverContext(key: String, action: String) {
+        val current = contextRecovery ?: return
+        val next = io.github.mangi.eta.ui.model.ContextRecoveryUiReducer.begin(current, key, action) ?: return
+        if (next === current) return
+        recoveryByRun = recoveryByRun + (current.decision.runId to next)
+        val d = current.decision
+        if (action == "stop") userStoppedRunIds.add(d.runId)
+        scope.launch(Dispatchers.IO) {
+            try {
+                AgentRuntimeClient(appContext, AndroidAgentLogger).recover(d.runId, d.requestId, d.nonce, d.revision, action) { accepted, message ->
+                    scope.launch(Dispatchers.Main) {
+                        if (action == "stop" && !accepted) userStoppedRunIds.remove(d.runId)
+                        val latest = recoveryByRun[d.runId]
+                        val ack = io.github.mangi.eta.ui.model.ContextRecoveryUiReducer.ack(latest, key, accepted, message)
+                        if (ack != null) recoveryByRun = recoveryByRun + (d.runId to ack)
+                    }
+                }
+            } catch (error: Exception) {
+                if (error is CancellationException) throw error
+                withContext(Dispatchers.Main) {
+                    val latest = recoveryByRun[d.runId]
+                    val ack = io.github.mangi.eta.ui.model.ContextRecoveryUiReducer.ack(latest, key, false, appContext.getString(R.string.context_recovery_disconnected))
+                    if (ack != null) recoveryByRun = recoveryByRun + (d.runId to ack)
+                }
+            }
+        }
+    }
 
     fun currentComposerDraft(): AgentChatComposerDraft =
         composerDrafts.get(selectedConversationId, homeState.input)
@@ -2032,6 +2063,11 @@ internal class AgentAppState(
             return
         }
         when (event) {
+            is AgentEvent.ContextRecovery -> {
+                if (event.decision.runId != runId) return
+                val next = io.github.mangi.eta.ui.model.ContextRecoveryUiReducer.receive(recoveryByRun[runId], event.decision)
+                recoveryByRun = recoveryByRun + (runId to next)
+            }
             is AgentEvent.ModelIdentityObserved -> {
                 val id = "assistant-$runId-model-identity-${event.round}"
                 val reported = event.reportedModelId
@@ -2082,6 +2118,7 @@ internal class AgentAppState(
         acknowledgeRuntimeResult: Boolean = false,
     ) {
         flushPendingRunDelta(runId)
+        recoveryByRun = recoveryByRun - runId
         val completedConversationId = conversationIdForRun(runId)
         val explicitlyStoppedByUser = userStoppedRunIds.remove(runId)
         val rewriting = result.operation == AgentRuntimeWire.OP_REWRITE_REPLY || isReplyRewrite(runId)

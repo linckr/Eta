@@ -2,6 +2,7 @@ package io.github.mangi.eta.agent.model
 
 import io.github.mangi.eta.agent.runtime.AgentEvent
 import io.github.mangi.eta.agent.runtime.AgentRunController
+import io.github.mangi.eta.agent.runtime.ContextRecoveryDecision
 import io.github.mangi.eta.agent.roleplay.RoleplayRunContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -65,6 +66,102 @@ internal class AgentLoop(
         onBudgetLog = onBudgetLog,
     )
     private var supplementIndex = initialSupplementIndex
+    private var recoveryRevision = 0L
+
+    /** Runs only at the existing model step; completed tools and transcript are never replayed. */
+    private fun prepareModelStep(roundTools: JSONArray): ProviderRequest {
+        var needsAutomaticPreparation = true
+        var pendingFailure: AgentModelFailure? = null
+        while (true) {
+            runController.throwIfCancelled()
+            var projected = AssistantScreenContextProjection.project(roleplayContext?.projectMessages(messages) ?: messages)
+            try {
+                if (pendingFailure == null && needsAutomaticPreparation && purpose.allowsTools) {
+                    val budget = AgentRequestBudget.evaluate(config, projected, roundTools, purpose)
+                    if (context.prepareForRequest(budget.estimatedTokens, budget.requestBytes)) {
+                        projected = AssistantScreenContextProjection.project(roleplayContext?.projectMessages(messages) ?: messages)
+                        val after = AgentRequestBudget.evaluate(config, projected, roundTools, purpose)
+                        context.reportRequestBudget(after.estimatedTokens, after.requestBytes)
+                    }
+                }
+                pendingFailure?.let { throw it }
+                val request = ProviderRequest(config, projected, roundTools, sessionId, purpose)
+                val budget = AgentRequestBudget.evaluate(config, projected, roundTools, purpose)
+                AgentRequestSendPolicy.requireAllowed(config, budget.requestBytes)
+                return request
+            } catch (failure: AgentModelFailure) {
+                if (purpose != ProviderRequestPurpose.CHAT || config.compactionPolicyVersion < 4 ||
+                    roleplayContext != null || !isContextRecoveryFailure(failure)) throw failure
+                pendingFailure = null
+                // Both writes complete before the live control surface is published.
+                publishTranscript()
+                context.preserveForRecovery()
+                projected = AssistantScreenContextProjection.project(roleplayContext?.projectMessages(messages) ?: messages)
+                val request = ProviderRequest(config, projected, roundTools, sessionId, purpose)
+                val attempt = ModelOneShotAttempt.create(request, clockMillis = android.os.SystemClock::elapsedRealtime)
+                val blocker = when {
+                    AnthropicEphemeralState.hasPendingToolResponse(messages) -> "SIGNED_TOOL_ROUND"
+                    context.hasTokenPressure(attempt.estimatedTokens) -> "MODEL_ONE_SHOT_TOKEN_PRESSURE"
+                    else -> attempt.eligibleReason
+                }
+                val decision = ContextRecoveryDecision(
+                    runId = runController.recoveryRunId.ifBlank { operationId }, revision = ++recoveryRevision,
+                    reasonCode = context.knownRecoveryFailureCode() ?: failure.code,
+                    detail = context.knownRecoveryFailureCode()?.let { "此前对此来源的自动压缩失败（$it），已暂停重复尝试。原历史和工具结果已保留。" } ?: failure.message.orEmpty(),
+                    stage = if (failure.code.startsWith("MODEL_REQUEST")) "pre_send" else "compaction",
+                    permitAvailable = blocker == null, permitUnavailableReason = blocker.orEmpty(),
+                    requestBytes = attempt.requestBytes, sendLimitBytes = attempt.sendLimitBytes ?: 0,
+                    hardLimitBytes = attempt.hardLimitBytes, estimatedTokens = attempt.estimatedTokens,
+                    inputLimit = attempt.inputLimit, providerLabel = config.providerName, modelLabel = config.model,
+                )
+                val settingsStamp = runController.recoveryConfigurationStamp()
+                attempt.configurationCurrent = {
+                    settingsStamp == runController.recoveryConfigurationStamp() &&
+                        toolsForRound?.invoke()?.toString()?.let { it == roundTools.toString() } != false
+                }
+                try {
+                    when (runController.contextRecovery.await(decision, onEvent)) {
+                        "send_once" -> {
+                            runController.throwIfCancelled()
+                            if (settingsStamp != runController.recoveryConfigurationStamp() ||
+                                toolsForRound?.invoke()?.toString()?.let { it != roundTools.toString() } == true) {
+                                attempt.invalidate()
+                                throw AgentModelFailure("MODEL_ONE_SHOT_BINDING_CHANGED", false,
+                                    "等待期间模型、提供商配置或工具目录已变化；本次许可失效。原历史与工具结果已保留，请重新确认。", contextRecoveryAllowed = false)
+                            }
+                            // No code mutates the context while the worker waits. Recheck exact binding now.
+                            attempt.inspect(request)
+                            attempt.authorize()
+                            attempt.onConsumed = {
+                                onEvent(AgentEvent.ContextRecovery(decision.copy(phase = "consumed", nonce = "", permitAvailable = false,
+                                    detail = "本次许可已用于一次物理请求尝试，尚未确认完成。连接失败、401或中断后均须重新确认，后续发送边界不变。")))
+                            }
+                            attempt.onFinished = { success, code ->
+                                onEvent(AgentEvent.ContextRecovery(decision.copy(phase = if (success) "completed" else "failed", nonce = "", permitAvailable = false,
+                                    detail = if (success) "本次物理请求已完成。后续请求仍按原容量策略检查。"
+                                    else "本次发送未完成（$code），许可${if (attempt.consumed) "已消费" else "已失效且未消费"}；再次发送须重新确认。原历史及工具结果已保留。")))
+                            }
+                            return request.copy(oneShotAttempt = attempt)
+                        }
+                        "compact" -> {
+                            attempt.invalidate()
+                            try { context.compact(force = true) }
+                            catch (next: AgentModelFailure) { pendingFailure = next }
+                            needsAutomaticPreparation = false
+                        }
+                    }
+                } finally {
+                    // Successful authorization is retained only by the returned request.
+                    if (runController.isCancelled) attempt.invalidate()
+                }
+            }
+        }
+    }
+
+    private fun isContextRecoveryFailure(failure: AgentModelFailure): Boolean =
+        failure.code !in setOf("CONTEXT_SUMMARY_CHECKPOINT_INVALID", "CONTEXT_STORAGE_FAILED") && (
+            failure.code.startsWith("MODEL_REQUEST_") || failure.code.startsWith("CONTEXT_SUMMARY_") ||
+            failure.code.startsWith("CONTEXT_COMPACTION_") || failure.code in setOf("CONTEXT_NO_REDUCTION", "CONTEXT_OVERFLOW", "CONTEXT_TOKEN_BUDGET", "CONTEXT_MERGE_TIMEOUT"))
 
     fun contextSnapshot(): AgentContextSnapshot? = context.snapshot()
 
@@ -113,35 +210,14 @@ internal class AgentLoop(
                 roundTools.optJSONObject(index)?.optJSONObject("function")?.optString("name")
             }
             publishTranscript()
-            var requestMessages = AssistantScreenContextProjection.project(
-                roleplayContext?.projectMessages(messages) ?: messages,
-            )
-            if (purpose.allowsTools) {
-                val budget = AgentRequestBudget.evaluate(config, requestMessages, roundTools, purpose)
-                if (context.prepareForRequest(budget.estimatedTokens, budget.requestBytes)) {
-                    // Re-evaluate the new request with this API's actual builder. A soft budget
-                    // does not permit another compaction loop or rejection of the remaining tail.
-                    try {
-                        requestMessages = AssistantScreenContextProjection.project(
-                            roleplayContext?.projectMessages(messages) ?: messages,
-                        )
-                        val compactedBudget = AgentRequestBudget.evaluate(config, requestMessages, roundTools, purpose)
-                        context.reportRequestBudget(compactedBudget.estimatedTokens, compactedBudget.requestBytes)
-                    } catch (failure: Exception) {
-                        // The attempt succeeded, but the post-compaction projection/measurement did not.
-                        // Record its terminal telemetry exactly once before propagating unchanged.
-                        context.reportRequestBudgetFailure(failure)
-                        throw failure
-                    }
-                }
-            }
+            val preparedRequest = prepareModelStep(roundTools)
             var roundInputTokens: Int? = null
             val reasoningLengthBeforeRound = accumulatedReasoning.length
             var preserveObservationForRecovery = false
             val completedRound = try {
                 modelRetry.complete(
                     initialRound = round,
-                    request = ProviderRequest(config, requestMessages, roundTools, sessionId, purpose),
+                    request = preparedRequest,
                     provider = provider,
                     controller = runController,
                     onEvent = { event ->

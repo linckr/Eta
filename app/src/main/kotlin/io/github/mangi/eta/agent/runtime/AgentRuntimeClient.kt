@@ -122,6 +122,33 @@ internal class AgentRuntimeClient(
         }
     }
 
+    /** Call off the main thread, like steerRun. ACK binds all live identity fields. */
+    fun recover(runId: String, requestId: String, nonce: String, revision: Long, action: String,
+                onAck: (Boolean, String) -> Unit) {
+        val result = withRuntimeMessenger(false to "运行服务不可用") { service ->
+            val latch = CountDownLatch(1)
+            val outcome = AtomicReference(false to "恢复决定未获确认，请重新查看当前状态")
+            val reply = Messenger(object : Handler(Looper.getMainLooper()) {
+                override fun handleMessage(msg: Message) {
+                    val d = msg.data
+                    if (msg.what != AgentRuntimeWire.MSG_CONTEXT_RECOVERY_ACK || d.getString("runId") != runId ||
+                        d.getString("requestId") != requestId || d.getString("nonce") != nonce || d.getLong("revision") != revision) return
+                    outcome.set(d.getBoolean("accepted") to d.getString("reason").orEmpty()); latch.countDown()
+                }
+            })
+            service.send(Message.obtain(null, AgentRuntimeWire.MSG_CONTEXT_RECOVERY).apply {
+                replyTo = reply
+                data = Bundle().apply {
+                    putString("runId", runId); putString("requestId", requestId); putString("nonce", nonce)
+                    putLong("revision", revision); putString("action", action)
+                }
+            })
+            latch.await(RESPONSE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            outcome.get()
+        }
+        onAck(result.first, result.second)
+    }
+
     fun cancelRun(runId: String) {
         if (runId.isBlank()) return
         withRuntimeMessenger(Unit) { serviceMessenger ->

@@ -36,13 +36,19 @@ internal data class AgentOverlayState(
  */
 internal fun AgentOverlayState.applyEvent(event: AgentEvent): AgentOverlayState {
     // 暂停在下一个检查点生效，之前已在途的工具结束等事件不能把文字切回运行态。
-    if (phase == AgentOverlayPhase.PAUSED && event !is AgentEvent.RunFinished && event !is AgentEvent.RunFailed) {
+    if (phase == AgentOverlayPhase.PAUSED && event !is AgentEvent.RunFinished && event !is AgentEvent.RunFailed && event !is AgentEvent.ContextRecovery) {
         return this
     }
     return projectEvent(event)
 }
 
 private fun AgentOverlayState.projectEvent(event: AgentEvent): AgentOverlayState = when (event) {
+    is AgentEvent.ContextRecovery -> copy(
+        phase = if (event.decision.phase == "waiting") AgentOverlayPhase.PAUSED else AgentOverlayPhase.RUNNING,
+        status = if (event.decision.phase == "waiting") AgentOverlayStatus.Paused else AgentOverlayStatus.Reasoning,
+        detailText = "${event.decision.detail} 打开 Eta 查看恢复操作。",
+        thought = if (event.decision.phase == "waiting") "需要确认；请打开 Eta" else thought,
+    )
     is AgentEvent.RunStarted -> copy(phase = AgentOverlayPhase.RUNNING, status = AgentOverlayStatus.Reasoning, detailText = "")
     is AgentEvent.RoundStarted -> copy(round = event.round).thinkingUnlessWorking()
     is AgentEvent.ProviderRequestStarted -> copy(round = event.round).thinkingUnlessWorking()

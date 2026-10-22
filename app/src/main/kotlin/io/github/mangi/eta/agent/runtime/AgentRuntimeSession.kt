@@ -65,6 +65,7 @@ internal class AgentRuntimeSession(
     )
 
     init {
+        controller.recoveryRunId = runId
         if (eventSink != null || resultSink != null) {
             subscribers += Subscriber(
                 eventSink = eventSink ?: {},
@@ -149,7 +150,7 @@ internal class AgentRuntimeSession(
         if (!controller.steer(prompt)) {
             val result = SteerRequestResult<T>(
                 accepted = false,
-                reason = "任务正在收尾",
+                reason = if (controller.contextRecovery.current != null) "任务等待恢复决定，补充草稿已保留" else "任务正在收尾",
             )
             steerRequests[requestId] = SteerRequestRecord(prompt, false, result.reason)
             return result

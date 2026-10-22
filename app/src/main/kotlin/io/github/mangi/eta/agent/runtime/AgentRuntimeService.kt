@@ -7,6 +7,7 @@ import android.app.ActivityOptions
 import android.app.PendingIntent
 import io.github.mangi.eta.ui.MainActivity
 import android.os.Build
+import android.os.Bundle
 import android.content.Context
 import android.content.Intent
 import android.content.res.Configuration
@@ -235,6 +236,25 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
                 return
             }
             when (msg.what) {
+                AgentRuntimeWire.MSG_CONTEXT_RECOVERY -> {
+                    // Only the app UI may acknowledge a live permit, never assistant hook processes.
+                    if (msg.sendingUid != android.os.Process.myUid()) return
+                    val data = msg.data ?: return
+                    val session = activeSession
+                    val identityRun = data.getString("runId").orEmpty()
+                    val requestId = data.getString("requestId").orEmpty()
+                    val outcome = if (session == null || session.isTerminal || session.runId != identityRun)
+                        false to "原任务已结束或已更换"
+                    else session.controller.contextRecovery.decide(identityRun, requestId,
+                        data.getString("nonce").orEmpty(), data.getLong("revision"), data.getString("action").orEmpty())
+                    runCatching { msg.replyTo?.send(Message.obtain(null, AgentRuntimeWire.MSG_CONTEXT_RECOVERY_ACK).apply {
+                        this.data = Bundle().apply {
+                            putString("runId", identityRun); putString("requestId", requestId)
+                            putString("nonce", data.getString("nonce")); putLong("revision", data.getLong("revision"))
+                            putBoolean("accepted", outcome.first); putString("reason", outcome.second)
+                        }
+                    }) }
+                }
                 AgentRuntimeWire.MSG_START_RUN -> {
                     val data = msg.data
                     if (data == null) {
@@ -507,6 +527,7 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
         entrySurfaceGuard: EntrySurfaceGuard?,
     ) {
         if (activeSession !== session) return
+        if (event is AgentEvent.ContextRecovery) mainHandler.post { if (activeSession === session) updateKeepScreenOn() }
         val revealsForegroundOperation = AgentOverlayVisibilityPolicy.shouldRevealFor(event)
         val requiresEntrySurfaceDismissal =
             AgentOverlayVisibilityPolicy.shouldDismissEntrySurfaceFor(event)
@@ -885,6 +906,10 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
     }
 
     private fun requestResume() {
+        if (activeSession?.controller?.contextRecovery?.current != null) {
+            openEtaFromResult()
+            return
+        }
         activeSession?.controller?.resume()
         updateKeepScreenOn()
         state.value = state.value.copy(
@@ -954,7 +979,7 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
         val session = activeSession
         setKeepScreenOn(
             session != null && !session.isTerminal &&
-                !session.controller.isCancelled && !session.controller.isPaused,
+                !session.controller.isCancelled && !session.controller.isPaused && session.controller.contextRecovery.current == null,
         )
     }
 

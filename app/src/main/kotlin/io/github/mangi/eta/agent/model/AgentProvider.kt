@@ -46,6 +46,8 @@ internal data class ProviderRequest(
     val sessionId: String = java.util.UUID.randomUUID().toString(),
     val purpose: ProviderRequestPurpose = ProviderRequestPurpose.CHAT,
     val freshConnection: Boolean = false,
+    /** In-memory single-physical-call lease; deliberately absent from ModelConfig and IPC. */
+    val oneShotAttempt: ModelOneShotAttempt? = null,
     val onTransportPhase: ((String) -> Unit)? = null,
 ) {
     val effectiveConfig: AgentModelClient.ModelConfig get() {
