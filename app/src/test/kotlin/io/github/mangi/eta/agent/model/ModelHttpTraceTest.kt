@@ -15,6 +15,17 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ModelHttpTraceTest {
+    @Test fun usageEventWithoutInputDoesNotPretendToCalibrateInput() {
+        val logs = mutableListOf<String>()
+        val trace = ModelHttpTrace(EndpointKind.RESPONSES, ProviderRequestPurpose.CHAT, logs::add)
+        trace.providerEvents {}(ProviderEvent.Usage(io.github.mangi.eta.agent.runtime.AgentTokenUsage(outputTokens = 42)))
+        trace.terminalReceived()
+        assertTrue(logs.last().contains("input_usage_status=partial"))
+        trace.providerEvents {}(ProviderEvent.Usage(io.github.mangi.eta.agent.runtime.AgentTokenUsage(inputTokens = 123)))
+        trace.terminalReceived()
+        assertTrue(logs.last().contains("input_usage_status=available"))
+        assertEquals(1L, trace.streamMetrics()["usable_input_usage_events"])
+    }
     @Test fun responsesShapeSurvivesFailureWithoutRecordingItemData() {
         val trace = ModelHttpTrace(EndpointKind.RESPONSES, ProviderRequestPurpose.CHAT, log = {})
         val stream = trace.stream(java.io.ByteArrayInputStream(byteArrayOf()))

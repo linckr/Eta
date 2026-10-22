@@ -17,6 +17,21 @@ import java.net.SocketTimeoutException
 import javax.net.ssl.SSLHandshakeException
 
 class AgentModelRetryTest {
+    @Test fun v4FinalTransportGuardStopsBeforeProviderAndDoesNotRetry() {
+        var calls = 0
+        val config = AgentModelClient.ModelConfig(baseUrl = "https://example.invalid", apiKey = "fixture",
+            model = "fixture", systemPrompt = "", compactionPolicyVersion = 4,
+            requestSendLimitBytes = 100)
+        val failure = assertThrows(AgentModelFailure::class.java) {
+            AgentModelRetry { _, _ -> fail("local boundary must not retry") }.complete(1,
+                ProviderRequest(config, JSONArray().put(AgentConversationCodec.userTextMessage("x".repeat(1000))), JSONArray()),
+                provider { _, _ -> calls++; response() }, AgentRunController(), {}, { _, _ -> }, {})
+        }
+        assertEquals("MODEL_REQUEST_SEND_LIMIT", failure.code)
+        assertEquals(0, calls)
+        assertFalse(failure.retryable)
+        assertFalse(failure.contextRecoveryAllowed)
+    }
     @Test
     fun retriesAreBoundedAndBackoffIsPerModelRound() {
         val delays = mutableListOf<Long>()

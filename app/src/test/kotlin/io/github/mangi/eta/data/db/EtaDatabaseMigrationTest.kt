@@ -18,7 +18,7 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [36])
+@Config(sdk = [36], application = android.app.Application::class)
 class EtaDatabaseMigrationTest {
     @Test
     fun migration6To24PreservesDataAndMovesCompleteConversationContext() {
@@ -57,6 +57,7 @@ class EtaDatabaseMigrationTest {
                 EtaDatabase.MIGRATION_21_22,
                 EtaDatabase.MIGRATION_22_23,
                 EtaDatabase.MIGRATION_23_24,
+                EtaDatabase.MIGRATION_24_25,
             )
             .build()
         try {
@@ -178,7 +179,7 @@ class EtaDatabaseMigrationTest {
         }
         // Opening Room performs its complete schema validation after the real SQLite migration.
         val database = Room.databaseBuilder(context, EtaDatabase::class.java, databaseName)
-            .addMigrations(EtaDatabase.MIGRATION_22_23, EtaDatabase.MIGRATION_23_24).build()
+            .addMigrations(EtaDatabase.MIGRATION_22_23, EtaDatabase.MIGRATION_23_24, EtaDatabase.MIGRATION_24_25).build()
         try {
             val models = runBlocking(Dispatchers.IO) { database.providerDao().models("provider-1") }
             assertEquals(beforeModels, models.size)
@@ -190,7 +191,7 @@ class EtaDatabaseMigrationTest {
             assertEquals(null, manual.inputTokenLimit)
             assertEquals(beforeMessages, runBlocking(Dispatchers.IO) { database.conversationDao().messages().size })
             assertEquals(null, runBlocking(Dispatchers.IO) { database.providerDao().providerById("provider-1") }!!.provider.requestByteBudget)
-            assertEquals(24, database.openHelper.readableDatabase.version)
+            assertEquals(25, database.openHelper.readableDatabase.version)
         } finally {
             database.close()
             context.deleteDatabase(databaseName)
@@ -198,26 +199,26 @@ class EtaDatabaseMigrationTest {
     }
 
     @Test
-    fun migration23To24KeepsProviderRows() {
+    fun migration24To25PreservesBudgetAndDefaultsToLegacyPolicy() {
         val context = RuntimeEnvironment.getApplication() as Context
         val databaseName = "m24-${UUID.randomUUID().toString().take(8)}.db"
         createVersion6Database(context, databaseName)
-        val to23 = listOf(
+        val to24 = listOf(
             EtaDatabase.MIGRATION_6_7, EtaDatabase.MIGRATION_7_8, EtaDatabase.MIGRATION_8_9,
             EtaDatabase.MIGRATION_9_10, EtaDatabase.MIGRATION_10_11, EtaDatabase.MIGRATION_11_12,
             EtaDatabase.MIGRATION_12_13, EtaDatabase.MIGRATION_13_14, EtaDatabase.MIGRATION_14_15,
             EtaDatabase.MIGRATION_15_16, EtaDatabase.MIGRATION_16_17, EtaDatabase.MIGRATION_17_18,
             EtaDatabase.MIGRATION_18_19, EtaDatabase.MIGRATION_19_20, EtaDatabase.MIGRATION_20_21,
-            EtaDatabase.MIGRATION_21_22, EtaDatabase.MIGRATION_22_23,
+            EtaDatabase.MIGRATION_21_22, EtaDatabase.MIGRATION_22_23, EtaDatabase.MIGRATION_23_24,
         )
         val helper = FrameworkSQLiteOpenHelperFactory().create(
             SupportSQLiteOpenHelper.Configuration.builder(context).name(databaseName)
-                .callback(object : SupportSQLiteOpenHelper.Callback(23) {
+                .callback(object : SupportSQLiteOpenHelper.Callback(24) {
                     override fun onCreate(db: SupportSQLiteDatabase) = error("Expected fixture")
                     override fun onUpgrade(db: SupportSQLiteDatabase, oldVersion: Int, newVersion: Int) {
                         assertEquals(6, oldVersion)
-                        assertEquals(23, newVersion)
-                        to23.forEach { it.migrate(db) }
+                        assertEquals(24, newVersion)
+                        to24.forEach { it.migrate(db) }
                     }
                 }).build(),
         )
@@ -226,18 +227,21 @@ class EtaDatabaseMigrationTest {
         val originalKey: String
         try {
             val db = helper.writableDatabase
-            assertEquals(23, db.version)
+            assertEquals(24, db.version)
+            db.execSQL("UPDATE model_providers SET request_byte_budget = 12345 WHERE id = 'provider-1'")
             db.execSQL("UPDATE provider_models SET context_window_override = 480000 WHERE id = 'manual-id'")
             providerCount = db.query("SELECT COUNT(*) FROM model_providers").use { it.moveToFirst(); it.getInt(0) }
             messageCount = db.query("SELECT COUNT(*) FROM conversation_messages").use { it.moveToFirst(); it.getInt(0) }
             originalKey = db.query("SELECT api_key FROM model_providers WHERE id = 'provider-1'").use { it.moveToFirst(); it.getString(0) }
         } finally { helper.close() }
         val database = Room.databaseBuilder(context, EtaDatabase::class.java, databaseName)
-            .addMigrations(EtaDatabase.MIGRATION_23_24).build()
+            .addMigrations(EtaDatabase.MIGRATION_24_25).build()
         try {
             val dao = database.providerDao()
             val before = runBlocking(Dispatchers.IO) { dao.providerById("provider-1") }!!
-            assertEquals(null, before.provider.requestByteBudget)
+            assertEquals("{}", before.provider.requestSendPolicyJson)
+            assertEquals(0, before.toDomain().requestSendPolicy.version)
+            assertEquals(12345, before.provider.requestByteBudget)
             assertEquals(originalKey, before.provider.apiKey)
             assertEquals(480_000, before.models.single { it.id == "manual-id" }.contextWindowOverride)
             for (budget in listOf(null, 0, 512 * 1024, Int.MAX_VALUE)) {
@@ -249,7 +253,7 @@ class EtaDatabaseMigrationTest {
             }
             assertEquals(providerCount, runBlocking(Dispatchers.IO) { dao.providers().size })
             assertEquals(messageCount, runBlocking(Dispatchers.IO) { database.conversationDao().messages().size })
-            assertEquals(24, database.openHelper.readableDatabase.version)
+            assertEquals(25, database.openHelper.readableDatabase.version)
         } finally {
             database.close()
             context.deleteDatabase(databaseName)

@@ -7,10 +7,55 @@ import io.github.mangi.eta.data.model.Model
 import io.github.mangi.eta.data.model.ProviderSourceTypes
 import io.github.mangi.eta.data.provider.BuiltinProviders
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Assert.assertNull
 import org.junit.Test
 
 class ProviderComponentsTest {
+    @Test fun invalidEarlyBootstrapNeedsExplicitOptInAndDoesNotKeepLargeLimit() {
+        val source = CustomProviderSetting("p", "Fixture", "https://example.invalid", requestByteBudget = 48 * 1024 * 1024)
+        val old = source.copy(requestSendPolicy = io.github.mangi.eta.data.model.RequestSendPolicy.freeze(source, null, null)
+            .copy(bootstrapRuleVersion = 0, sendLimitBytes = 48L * 1024 * 1024 + 524_288, growthAllowanceBytes = 524_288))
+        assertFalse(ProviderConfigDraft.from(old).sendPolicyEnabled)
+        fun update(enabled: Boolean?) = buildUpdatedProvider(old, old.name, old.baseUrl, old.apiKey,
+            "", old.isEnabled, old.endpointMode, false, "", emptyList(), sendPolicyEnabled = enabled)
+        assertEquals(0, update(null).requestSendPolicy.version)
+        val optedIn = update(true)
+        assertTrue(optedIn.requestSendPolicy.isValidFor(optedIn))
+        assertEquals(786_432L, optedIn.requestSendPolicy.sendLimitBytes)
+        assertEquals(48 * 1024 * 1024, optedIn.requestByteBudget)
+    }
+    @Test
+    fun sendPolicyExclusionNamesExposeExactlyModelsWithIndependentRequestOverrides() {
+        val provider = CustomProviderSetting("p", "Fixture", "https://example.invalid", models = listOf(
+            Model("safe", "safe", "无覆盖"),
+            Model("headers", "headers", "独立头", customHeaders = listOf(io.github.mangi.eta.data.model.CustomHeader("X-Test", "1"))),
+            Model("body", "fallback-id", "", customBody = listOf(io.github.mangi.eta.data.model.CustomBody("temperature", kotlinx.serialization.json.JsonPrimitive(0.5)))),
+        ))
+        assertEquals(listOf("独立头", "fallback-id"), requestSendPolicyExcludedModelNames(provider))
+        assertEquals(emptyList<String>(), requestSendPolicyExcludedModelNames(provider.copy(models = emptyList())))
+    }
+
+    @Test
+    fun explicitV4OptInFreezesLimitAndRouteEditsRequireNewOptIn() {
+        val source = CustomProviderSetting("p", "Fixture", "https://example.invalid")
+        fun update(p: CustomProviderSetting, baseUrl: String = p.baseUrl, enabled: Boolean = true) =
+            buildUpdatedProvider(p, p.name, baseUrl, p.apiKey, "", p.isEnabled, p.endpointMode,
+                false, "", emptyList(), sendPolicyEnabled = enabled, requestObservedBytes = 1_782_914)
+                as CustomProviderSetting
+        val enabled = update(source)
+        assertEquals(4, enabled.requestSendPolicy.version)
+        assertEquals(2_228_643L, enabled.requestSendPolicy.sendLimitBytes)
+        assertEquals(enabled.requestSendPolicy, update(enabled).requestSendPolicy)
+        val changed = update(enabled, "https://new.invalid")
+        assertEquals(0, changed.requestSendPolicy.version)
+        assertEquals(4, update(changed).requestSendPolicy.version)
+        assertEquals(0, update(enabled, enabled = false).requestSendPolicy.version)
+        org.junit.Assert.assertTrue(runCatching { positiveRequestBytes("-1") }.isFailure)
+        assertEquals(null, positiveRequestBytes(""))
+    }
+
     @Test
     fun contextCapacityDescriptionsDistinguishAutomaticSemanticsAndManualOverride() {
         val model = Model("m", "fixture", "Fixture", contextWindow = 128_000)
@@ -33,6 +78,9 @@ class ProviderComponentsTest {
             hostedWebSearchEnabled = true,
             anthropicVersion = "2023-06-01",
             requestByteBudgetKiB = "256.5",
+            sendPolicyEnabled = true,
+            observedRequestBytes = "1782914",
+            hardRequestBytes = "3000000",
         )
 
         val saved = with(ProviderConfigDraftSaver) {

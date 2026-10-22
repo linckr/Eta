@@ -5,6 +5,17 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class AgentCompactionRequestBudgetTest {
+    @Test fun v4SummaryUsesTransportLimitRatherThanChatSoftTrigger() {
+        val selected = config.copy(compactionPolicyVersion = 4, requestByteBudget = 1024,
+            requestSendLimitBytes = 100_000, requestGrowthAllowanceBytes = 20_000)
+        val source = messages("x".repeat(5000))
+        assertTrue(AgentCompactionRequestBudget.evaluate(selected, source).fits)
+        AgentCompactionRequestBudget.requireFits(selected, source)
+        val failure = assertThrows(AgentModelFailure::class.java) {
+            AgentCompactionRequestBudget.requireFits(selected.copy(requestSendLimitBytes = 1024), source)
+        }
+        assertEquals("MODEL_REQUEST_SEND_LIMIT", failure.code)
+    }
     private val config = AgentModelClient.ModelConfig(baseUrl = "https://fixture.invalid", apiKey = "fixture",
         model = "fixture", systemPrompt = "fixture")
     private fun messages(text: String) = JSONArray().put(AgentConversationCodec.userTextMessage(text))

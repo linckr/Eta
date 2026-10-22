@@ -27,6 +27,22 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [33, 36])
 class AgentRuntimeWireTest {
+    @Test fun frozenSendingPolicySurvivesWireAndOldRequestsRemainLegacy() {
+        val config = AgentModelClient.ModelConfig(baseUrl = "https://example.invalid", apiKey = "fixture",
+            model = "fixture", systemPrompt = "", compactionPolicyVersion = 4,
+            requestObservedBytes = 1_782_914, requestSendLimitBytes = 2_228_643,
+            requestGrowthAllowanceBytes = 445_729, requestHardLimitBytes = 3_000_000)
+        val request = AgentRuntimeWire.RunRequest(runId = "frozen-policy", prompt = "fixture", config = config, images = emptyList())
+        val bundle = AgentRuntimeWire.toLegacyBundle(request)
+        val restored = AgentRuntimeWire.runRequestFromBundle(bundle).config
+        assertEquals(config.compactionPolicyVersion, restored.compactionPolicyVersion)
+        assertEquals(config.requestObservedBytes, restored.requestObservedBytes)
+        assertEquals(config.requestSendLimitBytes, restored.requestSendLimitBytes)
+        assertEquals(config.requestGrowthAllowanceBytes, restored.requestGrowthAllowanceBytes)
+        assertEquals(config.requestHardLimitBytes, restored.requestHardLimitBytes)
+        bundle.remove("compaction_policy_version")
+        assertEquals(0, AgentRuntimeWire.runRequestFromBundle(bundle).config.compactionPolicyVersion)
+    }
     @Test
     fun compactionProgressSurvivesIpcAndArchiveAndLegacyFieldsStayOptional() {
         val event = AgentEvent.ContextCompaction("same-operation", AgentEvent.ContextCompaction.PHASE_PROGRESS,

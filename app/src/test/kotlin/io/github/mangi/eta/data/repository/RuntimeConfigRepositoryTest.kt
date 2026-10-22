@@ -17,6 +17,21 @@ import org.junit.Test
 
 class RuntimeConfigRepositoryTest {
     @Test
+    fun v4PolicyReachesRuntimeJsonOnlyForMatchingProviderRoute() {
+        val base = OpenAiCompatibleProviderSetting("v4", "Fixture", "https://example.invalid/v1")
+        val provider = base.copy(requestSendPolicy = io.github.mangi.eta.data.model.RequestSendPolicy.freeze(base, 1_782_914, null))
+        val model = Model("id", "model", "Model", contextWindow = 1_000_000)
+        val config = RuntimeConfigRepository.buildRuntimeConfig(provider, model)
+        assertEquals(4, config.compactionPolicyVersion)
+        assertEquals(2_228_643L, config.requestSendLimitBytes)
+        assertEquals(445_729L, config.requestGrowthAllowanceBytes)
+        assertEquals(1_782_914L, config.requestObservedBytes)
+        assertEquals(config, Json.decodeFromString<AgentModelClient.ModelConfig>(RuntimeConfigRepository.runtimeConfigJson(config)))
+        assertEquals(0, RuntimeConfigRepository.buildRuntimeConfig(provider.copy(apiKey = "changed"), model).compactionPolicyVersion)
+        assertEquals(0, RuntimeConfigRepository.buildRuntimeConfig(provider, model.copy(customHeaders = listOf(CustomHeader("X-Test", "1")))).compactionPolicyVersion)
+    }
+
+    @Test
     fun compactionSelectionDoesNotChangeChatModelOrFallbackWhenMissing() {
         val chat = AgentModelClient.ModelConfig(baseUrl = "https://chat.invalid", apiKey = "fixture", model = "chat", systemPrompt = "")
         val selected = Model("summary-id", "summary", "Summary", contextWindow = 64000)

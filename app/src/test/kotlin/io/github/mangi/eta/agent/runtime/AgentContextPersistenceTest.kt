@@ -14,7 +14,9 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [36])
+// Exercise the real Room stores without EtaApp's unrelated background repository jobs.
+// Those jobs race with this test's intentional close/reopen of the same database.
+@Config(sdk = [36], application = android.app.Application::class)
 class AgentContextPersistenceTest {
     private lateinit var context: Context
 
