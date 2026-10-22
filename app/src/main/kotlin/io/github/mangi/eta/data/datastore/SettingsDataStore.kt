@@ -18,6 +18,7 @@ import io.github.mangi.eta.data.model.AppearanceSettings
 import io.github.mangi.eta.data.model.AppearanceThemeMode
 import io.github.mangi.eta.data.model.AppearanceTopBarBlurStyle
 import io.github.mangi.eta.data.model.SpeechSettings
+import io.github.mangi.eta.data.model.WebToolsSettings
 import kotlinx.serialization.json.Json
 import io.github.mangi.eta.data.model.Settings
 import java.io.IOException
@@ -28,6 +29,7 @@ import kotlinx.coroutines.flow.map
 
 internal object SettingsDataStore {
     private val SPEECH_SETTINGS = stringPreferencesKey("speech_settings_v1")
+    private val WEB_TOOLS_SETTINGS = stringPreferencesKey("web_tools_settings_v1")
     private val speechJson = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
     fun speechSettingsFlow(): Flow<SpeechSettings> {
@@ -43,6 +45,26 @@ internal object SettingsDataStore {
     suspend fun setSpeechSettings(settings: SpeechSettings) {
         ensureInitialized()
         dataStore.edit { it[SPEECH_SETTINGS] = speechJson.encodeToString(settings) }
+    }
+
+    fun webToolsSettingsFlow(): Flow<WebToolsSettings> {
+        ensureInitialized()
+        return dataStore.data
+            .catch { cause ->
+                if (cause is IOException) emit(emptyPreferences()) else throw cause
+            }
+            .map { prefs ->
+                prefs[WEB_TOOLS_SETTINGS]?.let { raw ->
+                    runCatching { speechJson.decodeFromString<WebToolsSettings>(raw) }.getOrNull()
+                } ?: WebToolsSettings()
+            }
+    }
+
+    suspend fun webToolsSettings(): WebToolsSettings = webToolsSettingsFlow().first()
+
+    suspend fun setWebToolsSettings(settings: WebToolsSettings) {
+        ensureInitialized()
+        dataStore.edit { it[WEB_TOOLS_SETTINGS] = speechJson.encodeToString(settings) }
     }
 
     private const val STORE_NAME = "eta_settings"

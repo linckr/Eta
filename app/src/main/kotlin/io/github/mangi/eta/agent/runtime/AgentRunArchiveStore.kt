@@ -22,6 +22,11 @@ import org.json.JSONArray
  */
 internal object AgentRunArchiveStore {
 
+    fun createEventBuffer(handoff: AgentRuntimeWire.EntryHandoff?): MutableList<AgentEvent>? {
+        if (handoff == null || AgentExternalArchivePayload.from(handoff.payload) == null) return null
+        return mutableListOf()
+    }
+
     data class ArchivedRun(
         val handoff: AgentRuntimeWire.EntryHandoff,
         val events: List<AgentEvent>,

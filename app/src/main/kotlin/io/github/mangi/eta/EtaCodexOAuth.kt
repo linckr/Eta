@@ -160,7 +160,7 @@ internal object CodexOAuthManager {
         }
     }
 
-    suspend fun completeDeviceCodeLogin(deviceCode: CodexDeviceCode): CodexCredentials =
+    suspend fun completeDeviceCodeLogin(deviceCode: CodexDeviceCode, persist: Boolean = true, checkCancelled: () -> Unit = {}): CodexCredentials =
         withContext(Dispatchers.IO) {
             val lifetimeMillis = deviceCode.expiresInSeconds
                 .coerceIn(60L, MAX_DEVICE_LOGIN_MILLIS / 1000L) * 1000L
@@ -173,6 +173,7 @@ internal object CodexOAuthManager {
                 // Hermes waits before the first request.  Apart from matching
                 // the upstream flow, this avoids turning a freshly-issued
                 // device code into an immediate 403/404 burst.
+                checkCancelled()
                 val remainingMillis = deadline - System.currentTimeMillis()
                 if (remainingMillis <= 0L) break
                 delay(minOf(pollDelayMillis, remainingMillis))
@@ -185,7 +186,8 @@ internal object CodexOAuthManager {
                 if (result != null) {
                     val credentials = exchangeAuthorizationCode(result.authorizationCode, result.codeVerifier)
                     currentCoroutineContext().ensureActive()
-                    return@withContext store().writeAndReadBack(credentials)
+                    checkCancelled()
+                    return@withContext if (persist) store().writeAndReadBack(credentials) else credentials
                 }
             }
             throw CodexOAuthHttpException(

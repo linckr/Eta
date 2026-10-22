@@ -7,6 +7,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 import androidx.sqlite.db.SupportSQLiteOpenHelper
 import androidx.sqlite.db.framework.FrameworkSQLiteOpenHelperFactory
 import io.github.mangi.eta.data.model.ModelSource
+import io.github.mangi.eta.data.model.ProviderAuthModes
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
@@ -58,6 +59,7 @@ class EtaDatabaseMigrationTest {
                 EtaDatabase.MIGRATION_22_23,
                 EtaDatabase.MIGRATION_23_24,
                 EtaDatabase.MIGRATION_24_25,
+                EtaDatabase.MIGRATION_25_26,
             )
             .build()
         try {
@@ -123,6 +125,8 @@ class EtaDatabaseMigrationTest {
             assertEquals(null, runBlocking(Dispatchers.IO) { database.conversationDao().state() })
             assertEquals(listOf("built-in", "manual"), provider.models.map { it.modelId })
             assertEquals(false, provider.hostedWebSearchEnabled)
+            assertEquals(ProviderAuthModes.API_KEY, provider.authMode)
+            assertEquals("fixture-existing-api-key", provider.apiKey)
             assertEquals(false, migratedMessage.isEdited)
             assertEquals(emptyList<RuntimeInFlightRunWithEvents>(), inFlightRuns)
             assertEquals(listOf("mcp-1"), mcpServers.map { it.id })
@@ -179,7 +183,7 @@ class EtaDatabaseMigrationTest {
         }
         // Opening Room performs its complete schema validation after the real SQLite migration.
         val database = Room.databaseBuilder(context, EtaDatabase::class.java, databaseName)
-            .addMigrations(EtaDatabase.MIGRATION_22_23, EtaDatabase.MIGRATION_23_24, EtaDatabase.MIGRATION_24_25).build()
+            .addMigrations(EtaDatabase.MIGRATION_22_23, EtaDatabase.MIGRATION_23_24, EtaDatabase.MIGRATION_24_25, EtaDatabase.MIGRATION_25_26).build()
         try {
             val models = runBlocking(Dispatchers.IO) { database.providerDao().models("provider-1") }
             assertEquals(beforeModels, models.size)
@@ -191,7 +195,7 @@ class EtaDatabaseMigrationTest {
             assertEquals(null, manual.inputTokenLimit)
             assertEquals(beforeMessages, runBlocking(Dispatchers.IO) { database.conversationDao().messages().size })
             assertEquals(null, runBlocking(Dispatchers.IO) { database.providerDao().providerById("provider-1") }!!.provider.requestByteBudget)
-            assertEquals(25, database.openHelper.readableDatabase.version)
+            assertEquals(26, database.openHelper.readableDatabase.version)
         } finally {
             database.close()
             context.deleteDatabase(databaseName)
@@ -235,7 +239,7 @@ class EtaDatabaseMigrationTest {
             originalKey = db.query("SELECT api_key FROM model_providers WHERE id = 'provider-1'").use { it.moveToFirst(); it.getString(0) }
         } finally { helper.close() }
         val database = Room.databaseBuilder(context, EtaDatabase::class.java, databaseName)
-            .addMigrations(EtaDatabase.MIGRATION_24_25).build()
+            .addMigrations(EtaDatabase.MIGRATION_24_25, EtaDatabase.MIGRATION_25_26).build()
         try {
             val dao = database.providerDao()
             val before = runBlocking(Dispatchers.IO) { dao.providerById("provider-1") }!!
@@ -253,11 +257,70 @@ class EtaDatabaseMigrationTest {
             }
             assertEquals(providerCount, runBlocking(Dispatchers.IO) { dao.providers().size })
             assertEquals(messageCount, runBlocking(Dispatchers.IO) { database.conversationDao().messages().size })
-            assertEquals(25, database.openHelper.readableDatabase.version)
+            assertEquals(26, database.openHelper.readableDatabase.version)
         } finally {
             database.close()
             context.deleteDatabase(databaseName)
         }
+    }
+
+    @Test fun official23ConvergesWithoutLosingProviderOrHistory() = assertUnionMigration(23, true)
+    @Test fun local23ConvergesWithoutLosingProviderOrHistory() = assertUnionMigration(23, false)
+    @Test fun local24ConvergesWithoutLosingBudget() = assertUnionMigration(24, false)
+    @Test fun local25ConvergesWithoutLosingVerifiedFailures() = assertUnionMigration(25, false)
+    @Test fun official22ConvergesWithoutLosingHistory() = assertUnionMigration(22, false)
+
+    private fun assertUnionMigration(version: Int, official: Boolean) {
+        val context = RuntimeEnvironment.getApplication() as Context
+        val name = "union-${UUID.randomUUID()}.db"
+        createVersion6Database(context, name)
+        val to22 = listOf(EtaDatabase.MIGRATION_6_7, EtaDatabase.MIGRATION_7_8,
+            EtaDatabase.MIGRATION_8_9, EtaDatabase.MIGRATION_9_10, EtaDatabase.MIGRATION_10_11,
+            EtaDatabase.MIGRATION_11_12, EtaDatabase.MIGRATION_12_13, EtaDatabase.MIGRATION_13_14,
+            EtaDatabase.MIGRATION_14_15, EtaDatabase.MIGRATION_15_16, EtaDatabase.MIGRATION_16_17,
+            EtaDatabase.MIGRATION_17_18, EtaDatabase.MIGRATION_18_19, EtaDatabase.MIGRATION_19_20,
+            EtaDatabase.MIGRATION_20_21, EtaDatabase.MIGRATION_21_22)
+        val helper = FrameworkSQLiteOpenHelperFactory().create(SupportSQLiteOpenHelper.Configuration.builder(context)
+            .name(name).callback(object : SupportSQLiteOpenHelper.Callback(version) {
+                override fun onCreate(db: SupportSQLiteDatabase) = error("Expected old fixture")
+                override fun onUpgrade(db: SupportSQLiteDatabase, oldVersion: Int, newVersion: Int) {
+                    to22.forEach { it.migrate(db) }
+                    if (official) db.execSQL("ALTER TABLE model_providers ADD COLUMN auth_mode TEXT NOT NULL DEFAULT 'api_key'")
+                    else {
+                        if (version >= 23) EtaDatabase.MIGRATION_22_23.migrate(db)
+                        if (version >= 24) EtaDatabase.MIGRATION_23_24.migrate(db)
+                        if (version >= 25) EtaDatabase.MIGRATION_24_25.migrate(db)
+                    }
+                }
+            }).build())
+        var messageCount = 0
+        try {
+            val db = helper.writableDatabase
+            db.execSQL("UPDATE provider_models SET context_window_override=480000 WHERE id='manual-id'")
+            if (version >= 24) db.execSQL("UPDATE model_providers SET request_byte_budget=12345 WHERE id='provider-1'")
+            if (version >= 25) {
+                db.execSQL("UPDATE model_providers SET request_send_policy_json='{\"version\":4}' WHERE id='provider-1'")
+                db.execSQL("INSERT INTO compaction_failures VALUES ('fixture','digest',4,6,'invalid',1,12345,120)")
+            }
+            messageCount = db.query("SELECT COUNT(*) FROM conversation_messages").use { it.moveToFirst(); it.getInt(0) }
+        } finally { helper.close() }
+        val database = Room.databaseBuilder(context, EtaDatabase::class.java, name)
+            .addMigrations(EtaDatabase.MIGRATION_22_26, EtaDatabase.MIGRATION_23_26,
+                EtaDatabase.MIGRATION_24_26, EtaDatabase.MIGRATION_25_26).build()
+        try {
+            runBlocking(Dispatchers.IO) {
+                val provider = requireNotNull(database.providerDao().providerById("provider-1"))
+                assertEquals(480000, provider.models.single { it.id == "manual-id" }.contextWindowOverride)
+                assertEquals("api_key", provider.provider.authMode)
+                if (version >= 24) assertEquals(12345, provider.provider.requestByteBudget)
+                if (version >= 25) {
+                    assertEquals("{\"version\":4}", provider.provider.requestSendPolicyJson)
+                    assertEquals("digest", requireNotNull(database.compactionFailureDao().load("fixture")).sourceDigest)
+                }
+                assertEquals(messageCount, database.conversationDao().messages().size)
+            }
+            assertEquals(26, database.openHelper.readableDatabase.version)
+        } finally { database.close(); context.deleteDatabase(name) }
     }
 
     private fun createVersion6Database(
@@ -318,7 +381,7 @@ class EtaDatabaseMigrationTest {
                             "INSERT INTO model_providers " +
                                 "(id, type, name, base_url, api_key, is_enabled, is_built_in, sort_order, " +
                                 "system_prompt, custom_headers_json, custom_body_json, created_at, endpoint_mode, anthropic_version) " +
-                                "VALUES ('provider-1', 'openai_compatible', 'Provider', 'https://example.com/v1', '', 1, 0, 0, " +
+                                "VALUES ('provider-1', 'openai_compatible', 'Provider', 'https://example.com/v1', 'fixture-existing-api-key', 1, 0, 0, " +
                                 "NULL, '[]', '[]', 1, 'chat_completions', '2023-06-01')"
                         )
                         db.execSQL(providerModelInsert("built-in-id", "built-in", 1, 0))

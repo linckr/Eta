@@ -49,6 +49,7 @@ import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Lightbulb
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -567,6 +568,10 @@ private fun AgentMessageBlock(
     val haptic = LocalHapticFeedback.current
     var copied by remember(message.id) { mutableStateOf(false) }
     val keepStreamingMarkdown = remember(message.id) { message.isStreaming }
+    DisposableEffect(retainedStreamingState) {
+        retainedStreamingState?.attachContent()
+        onDispose { retainedStreamingState?.detachContent() }
+    }
     var streamingRevealComplete by remember(message.id) {
         mutableStateOf(!keepStreamingMarkdown)
     }
@@ -839,6 +844,10 @@ internal fun ThinkingRow(
     modifier: Modifier = Modifier,
     compact: Boolean = false,
 ) {
+    DisposableEffect(retainedStreamingState) {
+        retainedStreamingState?.attachContent()
+        onDispose { retainedStreamingState?.detachContent() }
+    }
     // null 表示跟随思考生命周期；用户点过之后只认手动选择。
     var manualExpanded by rememberSaveable(message.id) { mutableStateOf<Boolean?>(null) }
     val keepStreamingMarkdown = remember(message.id) { message.isStreaming }

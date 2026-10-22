@@ -1,5 +1,6 @@
 package io.github.mangi.eta.data.db
 
+import android.database.Cursor
 import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
@@ -9,6 +10,36 @@ import androidx.room.Upsert
 
 @Dao
 internal interface ConversationDao : ChunkedTextDao {
+    @Query(
+        "SELECT c.id, c.title, c.reasoning_effort, c.created_at, c.updated_at, c.model_id, " +
+            "(c.roleplay_json != '') AS has_roleplay, " +
+            "m.id AS message_id, m.type AS message_type, m.tool_name, " +
+            "COALESCE((SELECT substr(content, 1, 256) FROM agent_text_chunks " +
+            "WHERE owner_table = 'conversation_messages' AND owner_id = m.id AND field = 'content' " +
+            "AND chunk_index = 0), substr(m.content, 1, 256)) AS message_preview " +
+            "FROM conversations c LEFT JOIN conversation_messages m ON m.conversation_id = c.id " +
+            "AND m.sort_index = (SELECT MAX(sort_index) FROM conversation_messages WHERE conversation_id = c.id) " +
+            "ORDER BY c.updated_at DESC, c.id ASC"
+    )
+    suspend fun conversationIndex(): List<ConversationIndexRow>
+
+    @Query("SELECT id, title, created_at, updated_at FROM conversations")
+    suspend fun conversationIdentities(): List<ConversationIdentity>
+
+    @Query("UPDATE conversations SET title = :title, updated_at = :updatedAt WHERE id = :conversationId")
+    suspend fun updateConversationTitle(conversationId: String, title: String, updatedAt: Long)
+
+    @Query(
+        "SELECT id, title, thinking_enabled, reasoning_effort, " +
+            "applied_runtime_run_ids_json, roleplay_json, revisions_json, created_at, updated_at, model_id " +
+            "FROM conversations WHERE id = :conversationId"
+    )
+    suspend fun conversationMetadataRow(conversationId: String): ConversationMetadata?
+
+    @Transaction
+    suspend fun conversation(conversationId: String): ConversationMetadata? =
+        conversationMetadataRow(conversationId)?.let { restoreMetadata(it) }
+
     @Query(
         "SELECT id, title, thinking_enabled, reasoning_effort, " +
             "applied_runtime_run_ids_json, roleplay_json, revisions_json, created_at, updated_at, model_id " +
@@ -82,9 +113,51 @@ internal interface ConversationDao : ChunkedTextDao {
     @Query("SELECT * FROM conversation_messages WHERE conversation_id = :conversationId ORDER BY sort_index ASC LIMIT :limit OFFSET :offset")
     suspend fun messageRowsPage(conversationId: String, limit: Int, offset: Int): List<ConversationMessageEntity>
 
+    @Query("SELECT * FROM conversation_messages WHERE conversation_id = :conversationId AND type IN ('user', 'assistant') " +
+        "ORDER BY sort_index ASC LIMIT :limit OFFSET :offset")
+    suspend fun legacyMessageRowsPage(conversationId: String, limit: Int, offset: Int): List<ConversationMessageEntity>
+
     @Transaction
     suspend fun messagesPage(conversationId: String, limit: Int, offset: Int): List<ConversationMessageEntity> =
         messageRowsPage(conversationId, limit, offset).map { restoreMessage(it) }
+
+    @Query("SELECT * FROM conversation_messages WHERE conversation_id = :conversationId AND sort_index < :before " +
+        "ORDER BY sort_index DESC LIMIT :limit")
+    suspend fun messageRowsBefore(conversationId: String, before: Int, limit: Int): List<ConversationMessageEntity>
+
+    @Transaction
+    suspend fun messagesBefore(conversationId: String, before: Int, limit: Int): List<ConversationMessageEntity> =
+        messageRowsBefore(conversationId, before, limit).asReversed().map { restoreMessage(it) }
+
+    @Query("SELECT EXISTS(SELECT 1 FROM conversation_messages WHERE conversation_id = :conversationId AND sort_index < :before)")
+    suspend fun hasMessagesBefore(conversationId: String, before: Int): Boolean
+
+    @Query("SELECT COALESCE(MAX(sort_index) + 1, 0) FROM conversation_messages WHERE conversation_id = :conversationId")
+    suspend fun nextMessageIndex(conversationId: String): Int
+
+    @Query("SELECT DISTINCT conversation_id FROM conversation_messages WHERE type = 'system_notice' AND content IN (:codes)")
+    suspend fun searchSystemNotices(codes: List<String>): List<String>
+
+    @Query("SELECT id, conversation_id, type, content, tool_name, arguments_summary, result_summary, tools_json " +
+        "FROM conversation_messages ORDER BY conversation_id, sort_index")
+    fun messageSearchCursor(): Cursor
+
+    @Query("SELECT id, content FROM conversation_messages WHERE conversation_id = :conversationId AND id IN (:messageIds)")
+    suspend fun messageContents(conversationId: String, messageIds: List<String>): List<ConversationMessageContent>
+
+    @Query("SELECT EXISTS(SELECT 1 FROM conversation_messages WHERE conversation_id = :conversationId AND id = :messageId)")
+    suspend fun hasMessage(conversationId: String, messageId: String): Boolean
+
+    @Query("UPDATE conversation_messages SET content = :content, is_edited = CASE WHEN type = 'user' THEN 1 ELSE is_edited END " +
+        "WHERE conversation_id = :conversationId AND id = :messageId")
+    suspend fun updateMessageContentRow(conversationId: String, messageId: String, content: String)
+
+    @Transaction
+    suspend fun updateMessageContent(conversationId: String, messageId: String, content: String): Boolean {
+        if (!hasMessage(conversationId, messageId)) return false
+        updateMessageContentRow(conversationId, messageId, storeText("conversation_messages", messageId, "content", content))
+        return true
+    }
 
     @Query("SELECT COUNT(*) FROM conversation_messages WHERE conversation_id = :conversationId")
     suspend fun messageCount(conversationId: String): Int

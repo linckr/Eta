@@ -22,12 +22,23 @@ internal data class AgentChatUiState(
     val availableReasoningEfforts: List<ReasoningEffort> = emptyList(),
     val pendingImages: List<PendingImageUi> = emptyList(),
     val pendingFileReferences: List<PendingFileReferenceUi> = emptyList(),
+    val queuedMessages: List<QueuedMessageUi> = emptyList(),
+    val inputSyncVersion: Int = 0,
     val appliedRuntimeRunIds: List<String> = emptyList(),
     val messageEdit: MessageEditUiState? = null,
     val roleplay: RoleplayBinding? = null,
     val roleplayMessages: RoleplayMessageState = RoleplayMessageState(),
+    /** 窗口外但参与正文修订的同批消息原文；仅按需加载，不写入会话元数据。 */
+    val roleplayOriginalContents: Map<String, String> = emptyMap(),
     /** 会话最近一次发送使用的本地 Model.id；null 表示尚未绑定，跟随默认模型。 */
     val modelId: String? = null,
+    /** 未打开的会话仅保留侧栏预览，不能把占位状态写回消息和上下文。 */
+    val isConversationLoaded: Boolean = true,
+    /** 当前展示窗口首条消息的持久化 sort_index，保存只更新这一位置之后的后缀。 */
+    val messageStartIndex: Int = 0,
+    val hasEarlierMessages: Boolean = false,
+    val conversationCharacterName: String? = null,
+    val conversationCharacterAvatarPath: String? = null,
 ) {
     val canCompactContext: Boolean get() = !isStreaming && messageEdit == null && history.any {
         !it.contextSummary && (it.role == "assistant" || it.role == "tool")
@@ -179,6 +190,15 @@ data class PendingImageUi(
 data class PendingFileReferenceUi(
     val id: String,
     val reference: AgentFileReference,
+)
+
+@Immutable
+internal data class QueuedMessageUi(
+    val id: String,
+    val content: String,
+    val pendingImages: List<PendingImageUi> = emptyList(),
+    val pendingFileReferences: List<PendingFileReferenceUi> = emptyList(),
+    val immediateInterrupt: Boolean = false,
 )
 
 @Immutable

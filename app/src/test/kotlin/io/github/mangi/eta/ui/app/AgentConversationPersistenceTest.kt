@@ -3,6 +3,10 @@ package io.github.mangi.eta.ui.app
 import android.content.Context
 import io.github.mangi.eta.agent.model.AgentConversationCodec
 import io.github.mangi.eta.agent.model.AgentModelClient
+import io.github.mangi.eta.agent.roleplay.RoleplayBinding
+import io.github.mangi.eta.agent.roleplay.RoleplayMessageLink
+import io.github.mangi.eta.agent.roleplay.RoleplayMessageState
+import io.github.mangi.eta.agent.roleplay.RoleplayReplyRevision
 import io.github.mangi.eta.data.db.EtaDatabase
 import io.github.mangi.eta.ui.model.AgentChatHomeUiState
 import io.github.mangi.eta.ui.model.AgentMessageUi
@@ -166,6 +170,131 @@ class AgentConversationPersistenceTest {
         assertEquals(listOf("user", "thinking", "later", "answer"),
             reloaded.conversationsById.getValue("active").messages.map { it.id })
         assertTrue(reloaded.unalignedConversationIds.isEmpty())
+    }
+
+    @Test
+    fun appendingAndDeletingWithinATailWindowNeverRewritesTheUnloadedPrefix() = runBlocking {
+        val messages = (0 until 300).map { UserMessageUi("user-$it", "消息-$it") }
+        AgentConversationPersistence().save(context, snapshot(mapOf("active" to state("active").copy(messages = messages))))
+        val loaded = AgentConversationStore.load(context)
+        val persistence = AgentConversationPersistence(loaded)
+        val tail = loaded.conversationsById.getValue("active")
+        assertEquals(172, tail.messageStartIndex)
+        installAudit()
+
+        val appended = tail.copy(messages = tail.messages + AgentMessageUi("new-answer", "新回答"))
+        persistence.save(context, loaded.copy(conversationsById = mapOf("active" to appended)))
+
+        assertEquals(0, events("conversation_messages", "user-0"))
+        assertEquals(0, events("conversation_messages", "user-171"))
+        assertEquals(messages + appended.messages.last(), AgentConversationStore.loadAllMessages(context, "active"))
+
+        persistence.save(context, loaded.copy(conversationsById = mapOf("active" to appended.copy(messages = emptyList()))))
+
+        assertEquals(messages.take(172), AgentConversationStore.loadAllMessages(context, "active"))
+        assertEquals(0, events("conversation_messages", "user-171"))
+    }
+
+    @Test
+    fun renamingAnUnloadedConversationPreservesItsMessagesAndContext() = runBlocking {
+        val original = snapshot(mapOf("active" to state("active"), "dormant" to state("dormant")))
+        AgentConversationPersistence().save(context, original)
+        val dormantBefore = AgentConversationStore.loadConversation(context, "dormant")!!
+        val loaded = AgentConversationStore.load(context)
+        assertTrue(!loaded.conversationsById.getValue("dormant").isConversationLoaded)
+        installAudit()
+
+        AgentConversationPersistence(loaded).save(context, loaded.copy(
+            titles = loaded.titles + ("dormant" to "新名称"), updatedAt = loaded.updatedAt + ("dormant" to 20L),
+        ))
+
+        assertEquals(0, events("conversation_messages", "dormant-thinking"))
+        assertEquals(0, events("conversation_context_checkpoints", "dormant"))
+        val dormant = AgentConversationStore.loadConversation(context, "dormant")!!
+        assertEquals(dormantBefore.messages, dormant.messages)
+        assertEquals(dormantBefore.history, dormant.history)
+        assertEquals("新名称", EtaDatabase.get(context).conversationDao().conversation("dormant")!!.title)
+    }
+
+    @Test
+    fun adoptingAnEarlierPageDoesNotRewriteItsUnchangedRows() = runBlocking {
+        val original = state("active").copy(messages = (0 until 200).map { UserMessageUi("user-$it", "消息-$it") })
+        AgentConversationPersistence().save(context, snapshot(mapOf("active" to original)))
+        val loaded = AgentConversationStore.load(context)
+        val persistence = AgentConversationPersistence(loaded)
+        val state = loaded.conversationsById.getValue("active")
+        val page = AgentConversationStore.loadEarlierMessages(context, "active", state.messageStartIndex)
+        val expanded = state.copy(messages = page.messages + state.messages, messageStartIndex = page.startIndex,
+            hasEarlierMessages = page.hasEarlierMessages)
+        persistence.adoptConversation("active", expanded, loaded.titles.getValue("active"), loaded.updatedAt.getValue("active"))
+        installAudit()
+
+        persistence.save(context, loaded.copy(conversationsById = mapOf("active" to expanded)))
+
+        assertEquals(0, allEvents())
+        assertEquals(original.messages, AgentConversationStore.loadAllMessages(context, "active"))
+    }
+
+    @Test
+    fun offscreenRoleplayRevisionsUpdateStoredRowsWithoutLoadingTheirMessageWindow() = runBlocking {
+        val messages = (0 until 300).map { index ->
+            if (index % 2 == 0) UserMessageUi("message-$index", "正文-$index")
+            else AgentMessageUi("message-$index", "正文-$index")
+        }
+        val original = state("active").copy(
+            messages = messages,
+            roleplay = RoleplayBinding("character", "{}", "旅人"),
+            roleplayMessages = RoleplayMessageState(links = messages.associate { it.id to RoleplayMessageLink(it.id) }),
+        )
+        AgentConversationPersistence().save(context, snapshot(mapOf("active" to original)))
+        val loaded = AgentConversationStore.load(context)
+        val tail = loaded.conversationsById.getValue("active")
+        assertEquals(172, tail.messageStartIndex)
+        val editedContent = "修订".repeat(10_000)
+        val revised = tail.copy(roleplayMessages = tail.roleplayMessages.copy(revisions = mapOf(
+            "message-0" to RoleplayReplyRevision("正文-0", listOf("正文-0", editedContent), 1),
+            "message-1" to RoleplayReplyRevision("正文-1", listOf("正文-1", "新回答"), 1),
+        )))
+
+        AgentConversationPersistence(loaded).save(context, loaded.copy(conversationsById = mapOf("active" to revised)))
+
+        val allMessages = AgentConversationStore.loadAllMessages(context, "active")
+        assertEquals(300, allMessages.size)
+        assertEquals(UserMessageUi("message-0", editedContent, isEdited = true), allMessages[0])
+        assertEquals(AgentMessageUi("message-1", "新回答"), allMessages[1])
+        assertEquals(messages.drop(2), allMessages.drop(2))
+        assertEquals(setOf("active"), AgentConversationStore.searchConversationIds(context, "新回答"))
+    }
+
+    @Test
+    fun aNewOffscreenRevisionWithAMissingTargetRollsBackWithoutRejectingOldMetadata() = runBlocking {
+        val original = state("active").copy(
+            roleplay = RoleplayBinding("character", "{}", "旅人"),
+            roleplayMessages = RoleplayMessageState(revisions = mapOf(
+                "legacy-missing" to RoleplayReplyRevision("旧正文", listOf("旧正文"), 0),
+            )),
+        )
+        AgentConversationPersistence().save(context, snapshot(mapOf("active" to original)))
+        val loaded = AgentConversationStore.load(context)
+        val persistence = AgentConversationPersistence(loaded)
+        val current = loaded.conversationsById.getValue("active")
+        val revised = current.copy(roleplayMessages = current.roleplayMessages.copy(revisions =
+            current.roleplayMessages.revisions + ("missing-target" to RoleplayReplyRevision("原文", listOf("原文", "修改"), 1))))
+        var failed = false
+        try {
+            persistence.save(context, loaded.copy(conversationsById = mapOf("active" to revised), titles = mapOf("active" to "不应提交")))
+        } catch (_: IllegalStateException) {
+            failed = true
+        }
+
+        assertTrue(failed)
+        val restored = AgentConversationStore.loadConversation(context, "active")!!
+        assertEquals(current.roleplayMessages, restored.roleplayMessages)
+        assertEquals("active", EtaDatabase.get(context).conversationDao().conversation("active")!!.title)
+
+        persistence.save(context, loaded.copy(titles = mapOf("active" to "合法改名")))
+        assertEquals("合法改名", EtaDatabase.get(context).conversationDao().conversation("active")!!.title)
+        assertEquals(current.roleplayMessages, AgentConversationStore.loadConversation(context, "active")!!.roleplayMessages)
     }
 
     private fun state(id: String): AgentChatHomeUiState {

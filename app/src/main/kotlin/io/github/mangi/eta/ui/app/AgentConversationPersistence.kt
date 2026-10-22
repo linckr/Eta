@@ -22,6 +22,14 @@ internal class AgentConversationPersistence(initial: AgentConversationStore.Snap
         saved = current
     }
 
+    suspend fun adoptConversation(id: String, state: AgentChatHomeUiState, title: String, updatedAt: Long) = mutex.withLock {
+        saved = saved + (id to Content(state, title, updatedAt))
+    }
+
+    suspend fun forgetConversation(id: String) = mutex.withLock {
+        saved = saved - id
+    }
+
     private fun project(snapshot: AgentConversationStore.Snapshot): Map<String, Content> =
         snapshot.conversationsById.mapValues { (id, state) ->
             Content(state, snapshot.titles[id].orEmpty(), snapshot.updatedAt[id] ?: 0L)
@@ -38,11 +46,14 @@ internal class AgentConversationPersistence(initial: AgentConversationStore.Snap
         val messages: List<AgentChatMessageUi>,
         val history: List<AgentModelClient.ConversationMessage>,
         val journal: List<AgentModelClient.ConversationMessage>,
+        val isConversationLoaded: Boolean,
+        val messageStartIndex: Int,
     ) {
         constructor(state: AgentChatHomeUiState, title: String, updatedAt: Long) : this(
             title, updatedAt, state.reasoningEffort, state.appliedRuntimeRunIds,
             state.roleplay, if (state.roleplay == null) RoleplayMessageState() else state.roleplayMessages,
             state.modelId, state.messages, state.history, state.journal.ifEmpty { state.history },
+            state.isConversationLoaded, state.messageStartIndex,
         )
 
         fun sameMetadata(other: Content): Boolean =

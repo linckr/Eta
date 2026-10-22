@@ -39,6 +39,30 @@ internal data class ConversationMetadata(
     @ColumnInfo(name = "model_id") val modelId: String? = null,
 )
 
+/** 会话侧栏只读取定长预览，不读取上下文、角色卡与修订正文。 */
+internal data class ConversationIndexRow(
+    val id: String,
+    val title: String,
+    @ColumnInfo(name = "reasoning_effort") val reasoningEffort: String,
+    @ColumnInfo(name = "created_at") val createdAt: Long,
+    @ColumnInfo(name = "updated_at") val updatedAt: Long,
+    @ColumnInfo(name = "model_id") val modelId: String?,
+    @ColumnInfo(name = "message_id") val messageId: String?,
+    @ColumnInfo(name = "message_type") val messageType: String?,
+    @ColumnInfo(name = "message_preview") val messagePreview: String?,
+    @ColumnInfo(name = "tool_name") val toolName: String?,
+    @ColumnInfo(name = "has_roleplay") val hasRoleplay: Boolean,
+)
+
+internal data class ConversationIdentity(
+    val id: String,
+    val title: String,
+    @ColumnInfo(name = "created_at") val createdAt: Long,
+    @ColumnInfo(name = "updated_at") val updatedAt: Long,
+)
+
+internal data class ConversationMessageContent(val id: String, val content: String)
+
 @Serializable
 @Entity(
     tableName = "conversation_context_checkpoints",

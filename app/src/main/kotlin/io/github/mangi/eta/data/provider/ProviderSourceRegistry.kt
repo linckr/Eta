@@ -11,6 +11,7 @@ internal object ProviderSourceRegistry {
         ProviderSourceTypes.CUSTOM,
         ProviderSourceTypes.OPENAI,
         ProviderSourceTypes.OPENAI_CODEX,
+        ProviderSourceTypes.XAI,
         ProviderSourceTypes.ANTHROPIC,
         ProviderSourceTypes.BAILIAN,
         ProviderSourceTypes.DEEPSEEK,
@@ -28,7 +29,7 @@ internal object ProviderSourceRegistry {
     }
 
     fun resolve(provider: ProviderSetting): String =
-        resolve(
+        ProviderConnectionProfile.forAuthMode(provider.authMode)?.sourceType ?: resolve(
             providerId = provider.id,
             sourceType = provider.sourceType,
             baseUrl = provider.baseUrl,
@@ -57,6 +58,7 @@ internal object ProviderSourceRegistry {
         when (providerId) {
             BuiltinProviders.OPENAI_ID -> ProviderSourceTypes.OPENAI
             BuiltinProviders.OPENAI_CODEX_ID -> ProviderSourceTypes.OPENAI_CODEX
+            BuiltinProviders.XAI_ID -> ProviderSourceTypes.XAI
             BuiltinProviders.ANTHROPIC_ID -> ProviderSourceTypes.ANTHROPIC
             BuiltinProviders.BAILIAN_ID -> ProviderSourceTypes.BAILIAN
             BuiltinProviders.DEEPSEEK_ID -> ProviderSourceTypes.DEEPSEEK
@@ -75,6 +77,7 @@ internal object ProviderSourceRegistry {
             httpUrl.host == "chatgpt.com" && httpUrl.encodedPath.startsWith("/backend-api/codex") ->
                 ProviderSourceTypes.OPENAI_CODEX
             httpUrl.host == "api.openai.com" -> ProviderSourceTypes.OPENAI
+            httpUrl.host == "api.x.ai" || httpUrl.host == "cli-chat-proxy.grok.com" -> ProviderSourceTypes.XAI
             httpUrl.host == "api.anthropic.com" -> ProviderSourceTypes.ANTHROPIC
             httpUrl.host == "api.deepseek.com" -> ProviderSourceTypes.DEEPSEEK
             httpUrl.host == "api.moonshot.cn" -> ProviderSourceTypes.MOONSHOT

@@ -49,74 +49,90 @@ internal fun SpeechRecognitionScreen(onBack: () -> Unit, onOpenOss: () -> Unit) 
             item(key = "loading") { SpeechLoadingState(store.message) }
             return@MiuixScaffoldPage
         }
-        item(key = "service_title") {
-            EtaPreferenceGroupTitle(stringResource(R.string.speech_group_service))
-        }
-        item(key = "service") {
-            Column {
-                EtaPreferenceGroup {
-                    EtaOverlayDropdownPreference(
-                        title = stringResource(R.string.speech_service_and_model),
-                        items = AsrProvider.entries.map { it.label() },
-                        selectedIndex = settings.asr.ordinal,
-                        onSelectedIndexChange = { index ->
-                            AsrProvider.entries.getOrNull(index)?.let { store.edit(settings.copy(asr = it)) }
-                        },
-                    )
-                }
-                SpeechNote(
-                    stringResource(
-                        when (settings.asr) {
-                            AsrProvider.SYSTEM -> R.string.speech_asr_note_system
-                            AsrProvider.BREENO -> R.string.speech_asr_note_breeno
-                            AsrProvider.QWEN_REALTIME, AsrProvider.DOUBAO -> R.string.speech_asr_note_streaming
-                            AsrProvider.QWEN_FLASH -> R.string.speech_asr_note_flash
-                            AsrProvider.QWEN_FILE -> R.string.speech_asr_note_file
-                        },
-                    ),
+        item(key = "recognition_enabled") {
+            EtaPreferenceGroup {
+                EtaSwitchPreference(
+                    title = stringResource(R.string.speech_recognition_enabled),
+                    summary = stringResource(R.string.speech_recognition_enabled_summary),
+                    checked = settings.recognitionEnabled,
+                    onCheckedChange = { store.edit(settings.copy(recognitionEnabled = it)) },
                 )
             }
         }
-        if (settings.asr != AsrProvider.SYSTEM && settings.asr != AsrProvider.BREENO) {
-            item(key = "connection") {
-                SpeechConnectionSection(store, synthesis = false)
+        if (settings.recognitionEnabled) {
+            item(key = "service_title") {
+                EtaPreferenceGroupTitle(stringResource(R.string.speech_group_service))
             }
-        }
-        if (settings.asr != AsrProvider.SYSTEM && settings.asr != AsrProvider.DOUBAO && settings.asr != AsrProvider.BREENO) {
-            item(key = "language") {
-                EtaPreferenceGroup {
-                    SpeechFieldColumn {
-                        SpeechField(
-                            label = stringResource(R.string.speech_language_hint),
-                            value = settings.language,
-                            onChange = { store.edit(settings.copy(language = it.trim())) },
+            item(key = "service") {
+                Column {
+                    EtaPreferenceGroup {
+                        EtaOverlayDropdownPreference(
+                            title = stringResource(R.string.speech_service_and_model),
+                            items = AsrProvider.entries.map { it.label() },
+                            selectedIndex = settings.asr.ordinal,
+                            onSelectedIndexChange = { index ->
+                                AsrProvider.entries.getOrNull(index)?.let { store.edit(settings.copy(asr = it)) }
+                            },
+                        )
+                    }
+                    SpeechNote(
+                        stringResource(
+                            when (settings.asr) {
+                                AsrProvider.SYSTEM -> R.string.speech_asr_note_system
+                                AsrProvider.BREENO -> R.string.speech_asr_note_breeno
+                                AsrProvider.QWEN_REALTIME, AsrProvider.DOUBAO -> R.string.speech_asr_note_streaming
+                                AsrProvider.QWEN_FLASH -> R.string.speech_asr_note_flash
+                                AsrProvider.QWEN_FILE -> R.string.speech_asr_note_file
+                            },
+                        ),
+                    )
+                }
+            }
+            if (settings.asr != AsrProvider.SYSTEM && settings.asr != AsrProvider.BREENO) {
+                item(key = "connection") {
+                    SpeechConnectionSection(store, synthesis = false)
+                }
+            }
+            if (settings.asr != AsrProvider.SYSTEM && settings.asr != AsrProvider.DOUBAO && settings.asr != AsrProvider.BREENO) {
+                item(key = "language") {
+                    EtaPreferenceGroup {
+                        SpeechFieldColumn {
+                            SpeechField(
+                                label = stringResource(R.string.speech_language_hint),
+                                value = settings.language,
+                                onChange = { store.edit(settings.copy(language = it.trim())) },
+                            )
+                        }
+                    }
+                }
+            }
+            item(key = "result_title") {
+                EtaPreferenceGroupTitle(stringResource(R.string.speech_group_result))
+            }
+            item(key = "result") {
+                SpeechResultSection(store)
+            }
+            if (settings.asr == AsrProvider.QWEN_FILE) {
+                item(key = "oss") {
+                    EtaPreferenceGroup {
+                        EtaArrowPreference(
+                            title = stringResource(R.string.speech_oss_title),
+                            summary = settings.oss.bucket.ifBlank { stringResource(R.string.speech_oss_configure) },
+                            startAction = {
+                                EtaPreferenceIcon(icon = Icons.Rounded.CloudUpload, tint = EtaPreferenceColors.Blue)
+                            },
+                            onClick = onOpenOss,
                         )
                     }
                 }
             }
-        }
-        item(key = "result_title") {
-            EtaPreferenceGroupTitle(stringResource(R.string.speech_group_result))
-        }
-        item(key = "result") {
-            SpeechResultSection(store)
-        }
-        if (settings.asr == AsrProvider.QWEN_FILE) {
-            item(key = "oss") {
-                EtaPreferenceGroup {
-                    EtaArrowPreference(
-                        title = stringResource(R.string.speech_oss_title),
-                        summary = settings.oss.bucket.ifBlank { stringResource(R.string.speech_oss_configure) },
-                        startAction = {
-                            EtaPreferenceIcon(icon = Icons.Rounded.CloudUpload, tint = EtaPreferenceColors.Blue)
-                        },
-                        onClick = onOpenOss,
-                    )
-                }
+            item(key = "test") {
+                SpeechRecognitionTestSection(store)
             }
-        }
-        item(key = "test") {
-            SpeechRecognitionTestSection(store)
+        } else {
+            item(key = "recognition_disabled_note") {
+                SpeechNote(stringResource(R.string.speech_recognition_disabled_note))
+            }
         }
         item(key = "save") {
             SpeechSaveBlock(store) {
@@ -186,14 +202,6 @@ private fun SpeechRecognitionTestSection(store: SpeechSettingsStore) {
                 onClick = { if (state.active) store.recognition.finish() else request() },
                 endActions = {
                     if (state.active) {
-                        EtaTextButton(
-                            text = stringResource(R.string.action_done),
-                            onClick = { store.recognition.finish() },
-                            minWidth = 0.dp,
-                            minHeight = 34.dp,
-                            cornerRadius = 17.dp,
-                            insideMargin = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                        )
                         EtaTextButton(
                             text = stringResource(R.string.action_cancel),
                             onClick = { store.recognition.cancel() },

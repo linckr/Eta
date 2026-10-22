@@ -1,5 +1,6 @@
 package io.github.mangi.eta.data.db
 
+import android.database.Cursor
 import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.Insert
@@ -26,6 +27,9 @@ internal interface ChunkedTextDao {
 
     @Query("SELECT * FROM agent_text_chunks WHERE owner_table = :table AND owner_id = :owner AND field = :field ORDER BY chunk_index LIMIT :limit OFFSET :offset")
     suspend fun textChunks(table: String, owner: String, field: String, limit: Int, offset: Int): List<AgentTextChunkEntity>
+
+    @Query("SELECT chunk_index, content FROM agent_text_chunks WHERE owner_table = :table AND owner_id = :owner AND field = :field ORDER BY chunk_index")
+    fun textChunkCursor(table: String, owner: String, field: String): Cursor
 
     suspend fun storeText(table: String, owner: String, field: String, text: String): String {
         deleteTextChunks(table, owner, field)

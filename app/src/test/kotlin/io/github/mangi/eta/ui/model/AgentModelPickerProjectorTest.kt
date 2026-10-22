@@ -3,6 +3,7 @@ package io.github.mangi.eta.ui.model
 import io.github.mangi.eta.data.model.CustomProviderSetting
 import io.github.mangi.eta.data.model.Model
 import io.github.mangi.eta.data.model.OpenAiCompatibleProviderSetting
+import io.github.mangi.eta.data.model.ProviderAuthModes
 import io.github.mangi.eta.data.model.ProviderSourceTypes
 import io.github.mangi.eta.data.model.enabledModel
 import org.junit.Assert.assertEquals
@@ -92,6 +93,41 @@ class AgentModelPickerProjectorTest {
         assertEquals(listOf("configured"), result.providerGroups.map { it.providerId })
         assertEquals(selected.id, result.selectedModel?.id)
         assertEquals("missing-key", result.selectedModel?.providerId)
+    }
+
+    @Test
+    fun project_showsBothOAuthProvidersWithoutApiKeys() {
+        val providers = listOf(
+            provider(
+                id = "chatgpt",
+                apiKey = "",
+                authMode = ProviderAuthModes.OPENAI_CHATGPT,
+                models = listOf(model("chatgpt-model")),
+            ),
+            provider(
+                id = "grok",
+                apiKey = "",
+                authMode = ProviderAuthModes.XAI_GROK,
+                models = listOf(model("grok-model")),
+            ),
+        )
+
+        val result = AgentModelPickerProjector.project(providers, "grok", "grok-model")
+
+        assertEquals(listOf("chatgpt", "grok"), result.providerGroups.map { it.providerId })
+        assertEquals(listOf("chatgpt-model", "grok-model"), result.providerGroups.flatMap { it.models }.map { it.id })
+        assertEquals("grok-model", result.selectedModel?.id)
+    }
+
+    @Test
+    fun project_doesNotTreatUnknownAuthModesAsConfiguredApiKeys() {
+        val result = AgentModelPickerProjector.project(
+            providers = listOf(provider("unknown", authMode = "unsupported", models = listOf(model("model")))),
+            selectedProviderId = null,
+            selectedModelId = null,
+        )
+
+        assertEquals(emptyList<AgentModelProviderGroupUi>(), result.providerGroups)
     }
 
     @Test
@@ -214,6 +250,7 @@ class AgentModelPickerProjectorTest {
         sourceType: String = ProviderSourceTypes.CUSTOM,
         enabled: Boolean = true,
         apiKey: String = "test-key",
+        authMode: String = ProviderAuthModes.API_KEY,
         models: List<Model>,
     ) = CustomProviderSetting(
         id = id,
@@ -221,6 +258,7 @@ class AgentModelPickerProjectorTest {
         baseUrl = "https://example.com/$id",
         sourceType = sourceType,
         apiKey = apiKey,
+        authMode = authMode,
         isEnabled = enabled,
         models = models,
     )

@@ -4,6 +4,8 @@ import io.github.mangi.eta.data.db.EtaDatabase
 import android.content.Context
 import io.github.mangi.eta.agent.model.AgentModelClient
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -21,6 +23,28 @@ class AgentRunArchiveStoreTest {
         context = RuntimeEnvironment.getApplication()
         EtaDatabase.closeForTests()
         context.deleteDatabase("eta.db")
+    }
+
+    @Test
+    fun onlyRunsWithAnExternalArchiveConsumerAllocateAnEventBuffer() {
+        assertNull(AgentRunArchiveStore.createEventBuffer(null))
+        assertNull(AgentRunArchiveStore.createEventBuffer(
+            AgentRuntimeWire.EntryHandoff(
+                id = "ui-run",
+                source = AgentRuntimeWire.AGENT_UI_HANDOFF_SOURCE,
+                payload = AgentUiHandoffPayload(conversationId = "conversation").toJson(),
+            )
+        ))
+        assertNull(AgentRunArchiveStore.createEventBuffer(
+            AgentRuntimeWire.EntryHandoff("invalid-run", "external_test", "invalid payload")
+        ))
+        assertNotNull(AgentRunArchiveStore.createEventBuffer(
+            AgentRuntimeWire.EntryHandoff(
+                id = "external-run",
+                source = "external_test",
+                payload = AgentExternalArchivePayload("请求", "session", "外部入口").toJson(),
+            )
+        ))
     }
 
     @Test

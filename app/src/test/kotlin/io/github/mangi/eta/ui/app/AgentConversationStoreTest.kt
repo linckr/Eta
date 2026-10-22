@@ -60,6 +60,37 @@ class AgentConversationStoreTest {
     }
 
     @Test
+    fun pagedAndUnloadedConversationKeepsCompactedProjectionAndCompleteJournal() = runBlocking {
+        val journal = (0 until 150).map { index ->
+            AgentModelClient.ConversationMessage(
+                role = "user", content = "original-$index", messageId = "user-$index",
+            )
+        }
+        val projection = listOf(AgentModelClient.ConversationMessage(
+            role = "user", content = "validated summary", contextSummary = true,
+        )) + journal.takeLast(2)
+        val state = AgentChatHomeUiState(
+            messages = journal.map { UserMessageUi(requireNotNull(it.messageId), it.content) },
+            history = projection, journal = journal, input = "", isStreaming = false,
+            thinkingEnabled = false,
+        )
+        AgentConversationStore.save(context, "paged", mapOf("paged" to state), mapOf("paged" to "fixture"), mapOf("paged" to 1L))
+        val loaded = requireNotNull(AgentConversationStore.loadConversation(context, "paged"))
+        assertEquals(128, loaded.messages.size)
+        assertTrue(loaded.hasEarlierMessages)
+        assertEquals(projection, loaded.history)
+        assertEquals(journal, loaded.journal)
+
+        val dormant = AgentConversationStore.unloadConversation(loaded)
+        AgentConversationStore.save(context, "paged", mapOf("paged" to dormant), mapOf("paged" to "fixture"), mapOf("paged" to 2L))
+        EtaDatabase.closeForTests()
+        val restored = requireNotNull(AgentConversationStore.loadConversation(context, "paged"))
+        assertEquals(projection, restored.history)
+        assertEquals(journal, restored.journal)
+        assertEquals(150, AgentConversationStore.loadAllMessages(context, "paged").size)
+    }
+
+    @Test
     fun compactionProgressPersistsSafeCountsWithoutRestoringLiveState() = runBlocking {
         val raw = """{"completed_slices":13,"elapsed_ms":1500000,"processed_percent":65,"source":"private history",
             "activity":{"stage":"waiting","current_slice":14,"slice_elapsed_ms":12000,"body":"private summary"}}"""
@@ -310,7 +341,7 @@ class AgentConversationStoreTest {
     }
 
     @Test
-    fun saveAndLoadPreservesAllConversationsAndMessagesWithoutClipping() {
+    fun initialLoadKeepsOnlyTheSelectedMessageWindowAndEarlierPagesRemainComplete() {
         val longContent = "x".repeat(20_000)
         val primaryMessages = buildList {
             add(UserMessageUi(id = "conv-0-user-long", content = longContent))
@@ -364,9 +395,109 @@ class AgentConversationStoreTest {
 
         assertEquals(60, snapshot.conversationsById.size)
         val restored = snapshot.conversationsById.getValue("conv-0")
-        assertEquals(131, restored.messages.size)
-        assertEquals(longContent, (restored.messages.first() as UserMessageUi).content)
+        assertEquals(128, restored.messages.size)
+        assertEquals(3, restored.messageStartIndex)
+        assertTrue(restored.hasEarlierMessages)
         assertEquals("assistant-129", (restored.messages.last() as AgentMessageUi).content)
+        assertTrue(snapshot.conversationsById.filterKeys { it != "conv-0" }.values.none { it.isConversationLoaded })
+        val earlier = runBlocking { AgentConversationStore.loadEarlierMessages(context, "conv-0", restored.messageStartIndex) }
+        assertEquals(0, earlier.startIndex)
+        assertFalse(earlier.hasEarlierMessages)
+        assertEquals(primaryMessages, earlier.messages + restored.messages)
+        assertEquals(longContent, (earlier.messages.first() as UserMessageUi).content)
+        assertEquals(primaryMessages, runBlocking { AgentConversationStore.loadAllMessages(context, "conv-0") })
+    }
+
+    @Test
+    fun unopenedConversationOnlyReadsItsBoundedPreview() = runBlocking {
+        val dao = EtaDatabase.get(context).conversationDao()
+        dao.insertConversations(listOf(
+            ConversationEntity("active", "当前", false, createdAt = 1L, updatedAt = 2L),
+            ConversationEntity("dormant", "未打开", false, revisionsJson = "invalid deferred revisions",
+                createdAt = 1L, updatedAt = 1L),
+        ))
+        dao.insertMessages(listOf(ConversationMessageEntity("dormant-last", "dormant", 0, "assistant", "内容".repeat(20_000))))
+        dao.insertState(ConversationStateEntity(selectedConversationId = "active"))
+
+        val dormant = AgentConversationStore.load(context).conversationsById.getValue("dormant")
+
+        assertFalse(dormant.isConversationLoaded)
+        assertTrue(dormant.history.isEmpty())
+        assertTrue(dormant.journal.isEmpty())
+        assertEquals(256, (dormant.messages.single() as AgentMessageUi).content.length)
+    }
+
+    @Test
+    fun unloadedCharacterKeepsItsIdentityWithoutRetainingTheCard() = runBlocking {
+        val base = AgentChatHomeUiState(messages = emptyList(), input = "", isStreaming = false, thinkingEnabled = false)
+        val role = base.copy(roleplay = RoleplayBinding(
+            characterId = "character", cardSnapshotJson = "角色😀".repeat(20_000), characterName = "旅人",
+            avatarPath = "/test/avatar.png", userDescription = "很长的用户设定".repeat(5_000),
+        ))
+        AgentConversationStore.save(context, "active", mapOf("active" to base, "role" to role),
+            mapOf("active" to "当前", "role" to "旅人"), mapOf("active" to 2L, "role" to 1L))
+
+        val placeholder = AgentConversationStore.load(context).conversationsById.getValue("role")
+
+        assertFalse(placeholder.isConversationLoaded)
+        assertEquals(null, placeholder.roleplay)
+        assertEquals("旅人", placeholder.conversationCharacterName)
+        assertEquals("/test/avatar.png", placeholder.conversationCharacterAvatarPath)
+        val unloaded = AgentConversationStore.unloadConversation(role)
+        assertEquals(null, unloaded.roleplay)
+        assertEquals("旅人", unloaded.conversationCharacterName)
+        assertEquals("/test/avatar.png", unloaded.conversationCharacterAvatarPath)
+    }
+
+    @Test
+    fun searchFindsUnloadedChunkBoundariesAndTreatsSqlWildcardsLiterally() = runBlocking {
+        val dao = EtaDatabase.get(context).conversationDao()
+        dao.insertConversations(listOf(
+            ConversationEntity("literal", "文字", false, createdAt = 1L, updatedAt = 1L),
+            ConversationEntity("other", "另一条", false, createdAt = 1L, updatedAt = 2L),
+        ))
+        dao.insertMessages(listOf(
+            ConversationMessageEntity("literal-message", "literal", 0, "assistant", "x".repeat(16_381) + "跨越边界 100%_done"),
+            ConversationMessageEntity("other-message", "other", 0, "assistant", "100xxfinished"),
+        ))
+
+        assertEquals(setOf("literal"), AgentConversationStore.searchConversationIds(context, "跨越边界"))
+        assertEquals(setOf("literal"), AgentConversationStore.searchConversationIds(context, "%_"))
+        assertEquals(setOf("literal"), AgentConversationStore.searchConversationIds(context, "DONE"))
+        assertEquals(emptySet<String>(), AgentConversationStore.searchConversationIds(context, "eta:chunks"))
+        assertEquals(emptySet<String>(), AgentConversationStore.searchConversationIds(context, "[]"))
+    }
+
+    @Test
+    fun searchRetainsUnicodeCaseFoldingAndQueriesSpanningManyChunks() = runBlocking {
+        val dao = EtaDatabase.get(context).conversationDao()
+        dao.insertConversations(listOf(
+            ConversationEntity("unicode", "文字", false, createdAt = 1L, updatedAt = 1L),
+            ConversationEntity("large", "长文字", false, createdAt = 1L, updatedAt = 2L),
+            ConversationEntity("folded", "兼容字符", false, createdAt = 1L, updatedAt = 3L),
+        ))
+        val query = "开始" + "a".repeat(60_000) + "结束"
+        dao.insertMessages(listOf(
+            ConversationMessageEntity("unicode-message", "unicode", 0, "assistant", "äpfel"),
+            ConversationMessageEntity("large-message", "large", 0, "assistant", "前缀$query 后缀"),
+            ConversationMessageEntity("folded-message", "folded", 0, "assistant", "İKſ"),
+        ))
+
+        assertEquals(setOf("unicode"), AgentConversationStore.searchConversationIds(context, "ÄPFEL"))
+        assertEquals(setOf("large"), AgentConversationStore.searchConversationIds(context, query))
+        assertEquals(setOf("folded"), AgentConversationStore.searchConversationIds(context, "iks"))
+    }
+
+    @Test
+    fun searchIncludesMatchingLocalizedNoticeCodesFromEarlierMessages() = runBlocking {
+        val dao = EtaDatabase.get(context).conversationDao()
+        dao.insertConversations(listOf(ConversationEntity("notice", "标题", false, createdAt = 1L, updatedAt = 1L)))
+        dao.insertMessages(listOf(
+            ConversationMessageEntity("old-notice", "notice", 0, "system_notice", SystemNoticeCode.Interrupted.wireValue),
+            ConversationMessageEntity("new-message", "notice", 1, "assistant", "新的回答"),
+        ))
+
+        assertEquals(setOf("notice"), AgentConversationStore.searchConversationIds(context, "已中断", listOf(SystemNoticeCode.Interrupted)))
     }
 
     @Test

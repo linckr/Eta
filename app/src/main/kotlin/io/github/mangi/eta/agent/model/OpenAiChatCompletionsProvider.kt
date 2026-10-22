@@ -3,6 +3,7 @@ package io.github.mangi.eta.agent.model
 import io.github.mangi.eta.agent.runtime.AgentRunController
 import io.github.mangi.eta.agent.runtime.AgentTokenUsage
 import io.github.mangi.eta.data.model.OpenAiEndpointMode
+import io.github.mangi.eta.data.model.ProviderAuthModes
 import io.github.mangi.eta.data.model.ProviderSourceTypes
 import io.github.mangi.eta.data.provider.ProviderSourceRegistry
 import io.github.mangi.eta.core.AndroidAgentLogger
@@ -48,7 +49,11 @@ internal object OpenAiChatCompletionsProvider : AgentProviderClient {
                     add("Authorization", "Bearer ${config.apiKey}")
                 }
             }
-            .also { ProviderRequestHeaders.mergeInto(it, config.baseUrl, config.customHeaders, request.sessionId) }
+            .also {
+                ProviderRequestHeaders.mergeInto(
+                    it, config.baseUrl, config.customHeaders, request.sessionId, config.authMode, config.model,
+                )
+            }
             .build()
 
         val requestJson = AgentProviderRequestJson.build(request)
@@ -56,8 +61,8 @@ internal object OpenAiChatCompletionsProvider : AgentProviderClient {
             requestJson.optJSONArray("messages")?.let(ChatToolCallHistory::referencedIds).orEmpty()
         val requestBody = requestJson.toString().toRequestBody(JSON_MEDIA_TYPE)
 
-        val trace = ModelHttpTrace(capabilities.endpoint, request.purpose, onPhase = request.onTransportPhase)
-        val observedEvents = trace.providerEvents(onEvent)
+        var trace = ModelHttpTrace(capabilities.endpoint, request.purpose, onPhase = request.onTransportPhase)
+        var observedEvents = trace.providerEvents(onEvent)
         val httpRequest = Request.Builder()
             .url(url)
             .headers(headers)
@@ -65,43 +70,44 @@ internal object OpenAiChatCompletionsProvider : AgentProviderClient {
             .apply { trace.attach(this) }
             .build()
 
-        val call = AgentHttpClient.modelClient(request.purpose, request.freshConnection).newCall(httpRequest)
-        val binding = runController.register { call.cancel() }
-
         try {
-            runController.throwIfCancelled()
-            observedEvents(ProviderEvent.RequestStarted)
-
-            call.execute().use { response ->
-                val code = response.code
-                // Media type only: never log headers, URLs, credentials, or response content.
-                val mediaType = response.body.contentType()?.let { "${it.type}/${it.subtype}" }
-                    ?.takeIf { it in setOf("text/event-stream", "application/json", "text/plain") } ?: "other"
-                runCatching { AndroidAgentLogger.debug { "chat_response_headers status=$code content_type=$mediaType" } }
-                observedEvents(ProviderEvent.ResponseHeaders(code))
+            return AuthorizedProviderHttp.execute(
+                client = AgentHttpClient.modelClient(request.purpose, request.freshConnection),
+                providerId = config.providerId,
+                authMode = config.authMode,
+                request = httpRequest,
+                controller = runController,
+                prepareAttempt = { outgoing ->
+                    AgentRequestSendPolicy.requireAllowed(config, outgoing.body?.contentLength() ?: 0)
+                    trace = ModelHttpTrace(capabilities.endpoint, request.purpose, onPhase = request.onTransportPhase)
+                    observedEvents = trace.providerEvents(onEvent)
+                    observedEvents(ProviderEvent.RequestStarted)
+                    outgoing.newBuilder().apply { trace.attach(this) }.build()
+                },
+                onAuthorizationRetry = { response ->
+                    observedEvents(ProviderEvent.ResponseHeaders(response.code))
+                    trace.failure(AgentModelFailure.http(response.code, ""))
+                },
+            ) { response ->
+                observedEvents(ProviderEvent.ResponseHeaders(response.code))
                 runController.throwIfCancelled()
-
                 if (!response.isSuccessful) {
                     val errorSnapshot = BoundedHttpErrorBody.read(response)
-                    val errorBody = errorSnapshot.text
                     throw if (DeepSeekHttpFailure.appliesTo(config)) {
-                        DeepSeekHttpFailure.from(code, errorBody)
-                    } else AgentModelFailure.http(code, errorBody, trace.trustsReceiveFailure(response, errorSnapshot.complete), trace.traceId)
+                        DeepSeekHttpFailure.from(response.code, errorSnapshot.text)
+                    } else AgentModelFailure.http(
+                        response.code, errorSnapshot.text,
+                        trace.trustsReceiveFailure(response, errorSnapshot.complete), trace.traceId,
+                    )
                 }
-
-                val assistantMessage = readStreamingAssistantMessage(
-                    trace.stream(response.body.byteStream()), runController, existingToolCallIds, observedEvents,
-                )
+                val assistantMessage = readStreamingAssistantMessage(trace.stream(response.body.byteStream()), runController, existingToolCallIds, observedEvents)
                 observedEvents(ProviderEvent.Completed(assistantMessage.optString("finish_reason").ifBlank { null }))
                 trace.terminalReceived()
-                return ProviderResponse(assistantMessage, trace)
+                ProviderResponse(assistantMessage, trace)
             }
         } catch (throwable: Throwable) {
-            runCatching { runController.throwIfCancelled() }
-                .getOrElse { interruption -> throw interruption }
+            runController.throwIfCancelled()
             throw trace.failure(throwable)
-        } finally {
-            binding.close()
         }
     }
 
@@ -128,6 +134,18 @@ internal object OpenAiChatCompletionsProvider : AgentProviderClient {
                     request.put("stream_options", JSONObject().put("include_usage", true))
                 }
                 AgentOutputLimit.applyChatOptions(request, config)
+                if (config.authMode == ProviderAuthModes.XAI_GROK) {
+                    request.put("model", config.model)
+                    request.put("stream", true)
+                    request.put("messages", OpenAiRequestMessages.forChatCompletions(messages))
+                    if (purpose.allowsTools && tools.length() > 0) {
+                        request.put("tools", tools)
+                        request.put("tool_choice", "auto")
+                    } else {
+                        request.remove("tools")
+                        request.remove("tool_choice")
+                    }
+                }
                 if (!purpose.allowsTools) {
                     request.remove("tools")
                     request.remove("tool_choice")

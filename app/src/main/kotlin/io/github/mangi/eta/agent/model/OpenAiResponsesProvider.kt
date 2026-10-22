@@ -42,47 +42,58 @@ internal object OpenAiResponsesProvider : AgentProviderClient {
             .apply {
                 if (config.apiKey.isNotBlank()) add("Authorization", "Bearer ${config.apiKey}")
             }
-            .also { ProviderRequestHeaders.mergeInto(it, config.baseUrl, config.customHeaders, request.sessionId) }
+            .also {
+                ProviderRequestHeaders.mergeInto(
+                    it, config.baseUrl, config.customHeaders, request.sessionId, config.authMode,
+                )
+            }
             .build()
-        val trace = ModelHttpTrace(capabilities.endpoint, request.purpose, onPhase = request.onTransportPhase)
-        val observedEvents = trace.providerEvents(onEvent)
+        var trace = ModelHttpTrace(capabilities.endpoint, request.purpose, onPhase = request.onTransportPhase)
+        var observedEvents = trace.providerEvents(onEvent)
         val httpRequest = Request.Builder()
             .url(ProviderUrls.openAiResponsesUrl(config.baseUrl))
             .headers(headers)
             .post(body)
             .apply { trace.attach(this) }
             .build()
-        val call = AgentHttpClient.modelClient(request.purpose, request.freshConnection).newCall(httpRequest)
-        val binding = runController.register(call::cancel)
-
         try {
-            runController.throwIfCancelled()
-            observedEvents(ProviderEvent.RequestStarted)
-            call.execute().use { response ->
+            return AuthorizedProviderHttp.execute(
+                client = AgentHttpClient.modelClient(request.purpose, request.freshConnection),
+                providerId = config.providerId,
+                authMode = config.authMode,
+                request = httpRequest,
+                controller = runController,
+                prepareAttempt = { outgoing ->
+                    AgentRequestSendPolicy.requireAllowed(config, outgoing.body?.contentLength() ?: 0)
+                    trace = ModelHttpTrace(capabilities.endpoint, request.purpose, onPhase = request.onTransportPhase)
+                    observedEvents = trace.providerEvents(onEvent)
+                    observedEvents(ProviderEvent.RequestStarted)
+                    outgoing.newBuilder().apply { trace.attach(this) }.build()
+                },
+                onAuthorizationRetry = { response ->
+                    observedEvents(ProviderEvent.ResponseHeaders(response.code))
+                    trace.failure(AgentModelFailure.http(response.code, ""))
+                },
+            ) { response ->
                 observedEvents(ProviderEvent.ResponseHeaders(response.code))
                 runController.throwIfCancelled()
                 if (!response.isSuccessful) {
                     val errorSnapshot = BoundedHttpErrorBody.read(response)
-                    val errorBody = errorSnapshot.text
                     throw if (DeepSeekHttpFailure.appliesTo(config)) {
-                        DeepSeekHttpFailure.from(response.code, errorBody)
-                    } else AgentModelFailure.http(response.code, errorBody, trace.trustsReceiveFailure(response, errorSnapshot.complete), trace.traceId)
+                        DeepSeekHttpFailure.from(response.code, errorSnapshot.text)
+                    } else AgentModelFailure.http(
+                        response.code, errorSnapshot.text,
+                        trace.trustsReceiveFailure(response, errorSnapshot.complete), trace.traceId,
+                    )
                 }
-                val streamed = readStreamingResponse(
-                    stream = trace.stream(response.body.byteStream()),
-                    runController = runController,
-                    onEvent = observedEvents,
-                )
-                observedEvents(ProviderEvent.Completed(streamed.optString("finish_reason").ifBlank { null }))
+                val assistantMessage = readStreamingResponse(stream = trace.stream(response.body.byteStream()), runController = runController, onEvent = observedEvents)
+                observedEvents(ProviderEvent.Completed(assistantMessage.optString("finish_reason").ifBlank { null }))
                 trace.terminalReceived()
-                return ProviderResponse(assistantMessage = streamed, httpTrace = trace)
+                ProviderResponse(assistantMessage, trace)
             }
         } catch (throwable: Throwable) {
-            runCatching { runController.throwIfCancelled() }
-                .getOrElse { interruption -> throw interruption }
+            runController.throwIfCancelled()
             throw trace.failure(throwable)
-        } finally {
-            binding.close()
         }
     }
 
@@ -92,7 +103,7 @@ internal object OpenAiResponsesProvider : AgentProviderClient {
         tools: JSONArray,
     ): JSONObject = ResponsesRequestBuilder.build(config, messages, tools)
 
-    private fun readStreamingResponse(
+    internal fun readStreamingResponse(
         stream: java.io.InputStream?,
         runController: AgentRunController,
         onEvent: (ProviderEvent) -> Unit,
@@ -343,9 +354,16 @@ internal object OpenAiResponsesProvider : AgentProviderClient {
                     val itemId = event.hostedToolId("web_search")
                     finishHostedTool(itemId, "网页搜索", success = false)
                 }
-                "response.completed", "response.incomplete", "response.failed" -> {
-                    terminalType = type
+                "response.completed", "response.done", "response.incomplete", "response.failed" -> {
                     terminal = event.optJSONObject("response") ?: event
+                    terminalType = if (type == "response.done") {
+                        when (terminal.optString("status")) {
+                            "completed" -> "response.completed"
+                            "failed" -> "response.failed"
+                            "incomplete" -> "response.incomplete"
+                            else -> throw AgentModelFailure.incompleteStream("Codex 终止事件缺少有效状态")
+                        }
+                    } else type
                 }
                 "error" -> throwTopLevelEventError(event)
             }

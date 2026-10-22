@@ -4,6 +4,7 @@ import io.github.mangi.eta.agent.model.AgentModelClient
 import io.github.mangi.eta.agent.model.CodexCompatibilityProfile
 import io.github.mangi.eta.data.model.OpenAiEndpointMode
 import io.github.mangi.eta.data.model.ProviderSourceTypes
+import io.github.mangi.eta.data.model.ProviderAuthModes
 import io.github.mangi.eta.data.model.ProviderTypes
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -44,7 +45,7 @@ class CodexRuntimeSecretTest {
             assertEquals("", bundle.getString("api_key"))
             assertFalse(bundle.getString("api_key").orEmpty().contains(testCredential))
             assertEquals("", AgentRuntimeWire.runRequestFromBundle(bundle).config.apiKey)
-            assertEquals(CodexCompatibilityProfile.AUTH_MODE,
+            assertEquals(ProviderAuthModes.OPENAI_CHATGPT,
                 AgentRuntimeWire.runRequestFromBundle(bundle).config.authMode)
         }
     }

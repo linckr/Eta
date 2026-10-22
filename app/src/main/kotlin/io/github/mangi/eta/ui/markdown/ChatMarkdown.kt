@@ -1,6 +1,5 @@
 package io.github.mangi.eta.ui.markdown
 
-import android.util.LruCache
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
@@ -33,12 +32,12 @@ internal fun StaticMarkdown(
     val style = rememberMarkdownStyle(tone)
     val reusable = parsed?.takeIf { it.inlineStyle == style.inline }
     val document = reusable ?: produceState(
-        initialValue = StaticDocumentCache.get(content, style.inline),
+        initialValue = staticMarkdownDocumentCache.get(content, style.inline),
         content,
         style.inline,
     ) {
-        value = StaticDocumentCache.get(content, style.inline)
-            ?: withContext(Dispatchers.Default) { StaticDocumentCache.parse(content, style.inline) }
+        value = staticMarkdownDocumentCache.get(content, style.inline)
+            ?: withContext(Dispatchers.Default) { staticMarkdownDocumentCache.parse(content, style.inline) }
     }.value
     if (document == null) {
         // 解析完成前以同字号原文占位，高度与最终排版接近，避免列表越界绘制。
@@ -131,20 +130,4 @@ internal fun StreamingMarkdown(
             }
         },
     )
-}
-
-/**
- * 已完成消息的文档缓存。内容与行内样式共同决定文档；容量按条数限制，
- * 足以覆盖一屏上下来回滚动的历史消息。
- */
-private object StaticDocumentCache {
-    private val cache = LruCache<Pair<String, MarkdownInlineStyle>, MarkdownDocument>(MAX_ENTRIES)
-
-    fun get(content: String, style: MarkdownInlineStyle): MarkdownDocument? = cache.get(content to style)
-
-    fun parse(content: String, style: MarkdownInlineStyle): MarkdownDocument =
-        StreamingGfmParserSession().parse(content, isComplete = true, style = style).document
-            .also { cache.put(content to style, it) }
-
-    private const val MAX_ENTRIES = 96
 }

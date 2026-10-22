@@ -8,13 +8,18 @@ import io.github.mangi.eta.data.provider.ProviderSourceRegistry
 
 @DrawableRes
 internal fun providerBrandLogoRes(provider: ProviderSetting): Int? =
-    providerBrandLogoRes(ProviderSourceRegistry.resolve(provider))
+    when (provider.authMode) {
+        io.github.mangi.eta.data.model.ProviderAuthModes.OPENAI_CHATGPT -> R.drawable.provider_logo_codex
+        io.github.mangi.eta.data.model.ProviderAuthModes.XAI_GROK -> R.drawable.model_logo_grok
+        else -> providerBrandLogoRes(ProviderSourceRegistry.resolve(provider))
+    }
 
 @DrawableRes
 internal fun providerBrandLogoRes(sourceType: String): Int? =
     when (ProviderSourceRegistry.normalize(sourceType)) {
         ProviderSourceTypes.OPENAI -> R.drawable.provider_logo_openai
         ProviderSourceTypes.OPENAI_CODEX -> R.drawable.provider_logo_codex
+        ProviderSourceTypes.XAI -> R.drawable.model_logo_grok
         ProviderSourceTypes.ANTHROPIC -> R.drawable.provider_logo_anthropic
         ProviderSourceTypes.BAILIAN -> R.drawable.provider_logo_bailian
         ProviderSourceTypes.DEEPSEEK -> R.drawable.provider_logo_deepseek

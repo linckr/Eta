@@ -60,7 +60,7 @@ internal fun requestSendPolicyScope(provider: ProviderSetting): String {
         is AnthropicProviderSetting -> provider.anthropicVersion
     }
     val parts = listOf(provider.runtimeProviderType, provider.sourceType, provider.baseUrl.trim(),
-        endpoint, provider.apiKey.trim(), Json.encodeToString(provider.customHeaders),
+        endpoint, provider.authMode, provider.id, provider.apiKey.trim(), Json.encodeToString(provider.customHeaders),
         Json.encodeToString(provider.customBody), provider.hostedWebSearchEnabled.toString())
     val digest = MessageDigest.getInstance("SHA-256")
     parts.forEach { part ->

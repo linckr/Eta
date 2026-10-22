@@ -2,6 +2,8 @@ package io.github.mangi.eta.ui.app
 
 import io.github.mangi.eta.agent.model.AgentModelClient.ConversationMessage
 import io.github.mangi.eta.agent.roleplay.RoleplayBinding
+import io.github.mangi.eta.agent.roleplay.RoleplayMessageLink
+import io.github.mangi.eta.agent.roleplay.RoleplayMessageState
 import io.github.mangi.eta.agent.runtime.AgentRuntimeWire
 import io.github.mangi.eta.ui.model.AgentChatUiState
 import io.github.mangi.eta.ui.model.AgentMessageUi
@@ -121,5 +123,75 @@ class RoleplayConversationReducerTest {
         assertTrue(recovered.roleplayMessages.revisions.isEmpty())
         assertEquals(state.history, recovered.history)
         assertEquals("你好", (recovered.messages.first() as AgentMessageUi).content)
+    }
+
+    @Test fun editingAPagedBlockPreservesItsUnloadedSiblings() {
+        val state = pagedConversation()
+
+        val edited = requireNotNull(RoleplayConversationReducer.edit(state, "reply-1", "修订第二段"))
+
+        assertEquals("第一段\n\n修订第二段", edited.history.single().content)
+        assertEquals(state.journal, edited.journal)
+        assertEquals("修订第二段", (edited.messages.single() as AgentMessageUi).content)
+        assertEquals(setOf("reply-0"), RoleplayConversationReducer.requiredOriginalContentIds(state))
+    }
+
+    @Test fun rewritingAPagedBlockUsesTheUnloadedPrefix() {
+        val prefix = requireNotNull(RoleplayConversationReducer.rewriteHistory(pagedConversation(), "reply-1"))
+
+        assertEquals("第一段", prefix.single().content)
+        assertEquals("", prefix.single().toolCallsJson)
+    }
+
+    @Test fun pagedRunLinkingKeepsOriginalBlockOrder() {
+        val linked = RoleplayConversationReducer.linkRun(pagedConversation(), "later-run")
+
+        assertEquals(1, linked.roleplayMessages.links.getValue("reply-1").blockOrder)
+        assertEquals("第一段", requireNotNull(RoleplayConversationReducer.rewriteHistory(linked, "reply-1")).single().content)
+    }
+
+    @Test fun missingSiblingRejectsTheRevisionInsteadOfDroppingItsBody() {
+        val state = pagedConversation().copy(roleplayOriginalContents = emptyMap())
+
+        assertNull(RoleplayConversationReducer.edit(state, "reply-1", "修订第二段"))
+        assertNull(RoleplayConversationReducer.rewriteHistory(state, "reply-1"))
+        assertEquals("第一段\n\n第二段", state.history.single().content)
+    }
+
+    @Test fun pendingRewriteCanFinishWhenItsTargetIsOutsideTheWindow() {
+        val source = pagedConversation()
+        val state = source.copy(
+            messages = emptyList(),
+            roleplayOriginalContents = mapOf("reply-0" to "第一段", "reply-1" to "第二段"),
+            roleplayMessages = source.roleplayMessages.copy(pendingRewrites = mapOf("rewrite" to "reply-1")),
+        )
+
+        val rewritten = RoleplayConversationReducer.applyRewrite(
+            state, "rewrite", AgentRuntimeWire.RunResult(
+                "rewrite", true, "重写第二段", operation = AgentRuntimeWire.OP_REWRITE_REPLY,
+                rewriteTargetMessageId = "reply-1",
+            ),
+        )
+
+        assertEquals("第一段\n\n重写第二段", rewritten.history.single().content)
+        assertEquals("重写第二段", rewritten.roleplayMessages.revisions.getValue("reply-1").content)
+        assertTrue(rewritten.messages.isEmpty())
+        assertTrue(rewritten.roleplayMessages.pendingRewrites.isEmpty())
+    }
+
+    private fun pagedConversation(): AgentChatUiState {
+        val journal = listOf(ConversationMessage("assistant", "第一段\n\n第二段", messageId = "reply"))
+        return AgentChatUiState(
+            messages = listOf(AgentMessageUi("reply-1", "第二段")),
+            history = journal, journal = journal, input = "", isStreaming = false, thinkingEnabled = false,
+            roleplay = RoleplayBinding("character", "{}", "角色"),
+            roleplayMessages = RoleplayMessageState(links = mapOf(
+                "reply-0" to RoleplayMessageLink("reply", 0),
+                "reply-1" to RoleplayMessageLink("reply", 1),
+            )),
+            roleplayOriginalContents = mapOf("reply-0" to "第一段"),
+            messageStartIndex = 1,
+            hasEarlierMessages = true,
+        )
     }
 }

@@ -13,6 +13,7 @@ import io.github.mangi.eta.data.model.CustomBody
 import io.github.mangi.eta.data.model.CustomHeader
 import io.github.mangi.eta.data.model.OpenAiEndpointMode
 import io.github.mangi.eta.data.model.ModelReasoningCapabilities
+import io.github.mangi.eta.data.model.ProviderAuthModes
 import io.github.mangi.eta.data.model.ProviderTypes
 import io.github.mangi.eta.data.model.ProviderSourceTypes
 import io.github.mangi.eta.data.model.ReasoningEffort
@@ -264,10 +265,14 @@ internal object AgentModelClient {
 
     private fun ModelConfig.validate() {
         require(baseUrl.isNotBlank()) { "请先配置 API 地址" }
-        val usesCodexSubscription = authMode == CodexCompatibilityProfile.AUTH_MODE ||
-            providerSourceType == ProviderSourceTypes.OPENAI_CODEX ||
-            providerId == BuiltinProviders.OPENAI_CODEX_ID
-        if (!usesCodexSubscription) require(apiKey.isNotBlank()) { "请先配置 API Key" }
+        when {
+            effectiveAuthMode == ProviderAuthModes.API_KEY -> require(apiKey.isNotBlank()) { "请先配置 API Key" }
+            ProviderAuthModes.isOAuth(effectiveAuthMode) -> {
+                require(providerId.isNotBlank()) { "账号登录缺少服务商标识，请重新选择服务商" }
+                require(apiKey.isEmpty()) { "账号登录配置不能包含 API Key" }
+            }
+            else -> error("不支持的服务商认证方式")
+        }
         require(model.isNotBlank()) { "请先配置模型名" }
         require(
             reasoningCapabilities?.mandatory != true ||
@@ -302,8 +307,6 @@ internal object AgentModelClient {
         val providerName: String = "",
         val providerType: String = ProviderTypes.OPENAI_COMPATIBLE,
         val providerSourceType: String = "",
-        /** Defaults to the existing Platform/API-key authentication path. */
-        val authMode: String = CodexCompatibilityProfile.API_KEY_AUTH_MODE,
         val baseUrl: String,
         val apiKey: String,
         val model: String,
@@ -339,7 +342,13 @@ internal object AgentModelClient {
         val customHeaders: List<CustomHeader> = emptyList(),
         val customBody: List<CustomBody> = emptyList(),
         val autoCompactionEnabled: Boolean = Prefs.Keys.BOOLEAN_DEFAULTS.getValue(Prefs.Keys.AGENT_AUTO_COMPACTION_ENABLED),
+        val authMode: String = ProviderAuthModes.API_KEY,
     ) {
+        /** Old persisted subscription snapshots use the same new credential owner. */
+        val effectiveAuthMode: String
+            get() = if (authMode == CodexCompatibilityProfile.AUTH_MODE)
+                ProviderAuthModes.OPENAI_CHATGPT else authMode
+
         val usesHostedWebSearch: Boolean
             get() = hostedWebSearchEnabled && providerType == ProviderTypes.OPENAI_COMPATIBLE &&
                 openAiEndpointMode == OpenAiEndpointMode.RESPONSES

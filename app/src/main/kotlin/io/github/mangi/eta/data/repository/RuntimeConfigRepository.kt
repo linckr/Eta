@@ -12,12 +12,14 @@ import io.github.mangi.eta.data.model.ModelReasoningCapabilities
 import io.github.mangi.eta.data.model.OpenAiCompatibleProviderSetting
 import io.github.mangi.eta.data.model.OpenAiEndpointMode
 import io.github.mangi.eta.data.model.ProviderSetting
+import io.github.mangi.eta.data.model.ProviderAuthModes
 import io.github.mangi.eta.data.model.ReasoningEffort
 import io.github.mangi.eta.data.model.enabledModel
 import io.github.mangi.eta.data.model.runtimeProviderType
 import io.github.mangi.eta.data.model.selectedOrFirstModel
 import io.github.mangi.eta.data.provider.BuiltinProviders
 import io.github.mangi.eta.data.provider.ProviderSourceRegistry
+import io.github.mangi.eta.data.provider.ProviderConnectionProfile
 import io.github.mangi.eta.data.provider.ReasoningCapabilityResolver
 import io.github.libxposed.service.XposedService
 import kotlinx.serialization.encodeToString
@@ -85,6 +87,18 @@ internal object RuntimeConfigRepository {
         return currentRuntimeConfig()
     }
 
+    suspend fun oauthRuntimeConfigFor(
+        providerId: String,
+        authMode: String,
+        modelName: String,
+    ): AgentModelClient.ModelConfig? {
+        if (!ProviderAuthModes.isOAuth(authMode)) return null
+        val provider = ProviderRepository.providerById(providerId)
+            ?.takeIf { it.isEnabled && it.authMode == authMode } ?: return null
+        val model = provider.models.firstOrNull { it.isEnabled && it.modelId == modelName } ?: return null
+        return buildRuntimeConfig(provider, model)
+    }
+
     suspend fun syncToRemotePreferences(service: XposedService?): Boolean {
         val prefs = Prefs.remotePreferencesForUi(service) ?: return false
         val config = currentRuntimeConfig() ?: return clearRuntimeConfig(prefs)
@@ -115,7 +129,7 @@ internal object RuntimeConfigRepository {
             providerSourceType == io.github.mangi.eta.data.model.ProviderSourceTypes.OPENAI_CODEX ||
             providerId == BuiltinProviders.OPENAI_CODEX_ID
         return copy(
-            apiKey = if (isCodex) "" else apiKey,
+            apiKey = if (isCodex || ProviderAuthModes.isOAuth(authMode)) "" else apiKey,
             compactionModelConfig = compactionModelConfig?.copy(compactionModelId = null, compactionModelConfig = null)?.withoutCodexSecret(),
         )
     }
@@ -126,9 +140,8 @@ internal object RuntimeConfigRepository {
             ?.takeIf { it.isNotBlank() }
             ?: BuiltinProviders.DEFAULT_SYSTEM_PROMPT
         val sourceType = ProviderSourceRegistry.resolve(provider)
-        val isCodexSubscription = sourceType == io.github.mangi.eta.data.model.ProviderSourceTypes.OPENAI_CODEX ||
-            provider.id == BuiltinProviders.OPENAI_CODEX_ID
-        val endpointMode = provider.endpointMode()
+        val profile = ProviderConnectionProfile.forAuthMode(provider.authMode)
+        val endpointMode = profile?.endpointMode ?: provider.endpointMode()
         val reasoningCapabilities = reasoningCapabilities(provider, model)
         // Provider-scoped policy does not cover a model's route/header/body overrides.
         val sendPolicy = provider.requestSendPolicy.takeIf {
@@ -137,14 +150,11 @@ internal object RuntimeConfigRepository {
         return AgentModelClient.ModelConfig(
             providerId = provider.id,
             providerName = provider.name,
-            providerType = provider.runtimeProviderType,
+            providerType = profile?.providerType ?: provider.runtimeProviderType,
             providerSourceType = sourceType,
-            baseUrl = if (isCodexSubscription) {
-                CodexCompatibilityProfile.CODEX_RESPONSES_BASE_URL
-            } else {
-                provider.baseUrl.trim()
-            },
-            apiKey = if (isCodexSubscription) "" else provider.apiKey.trim(),
+            baseUrl = profile?.baseUrl ?: provider.baseUrl.trim(),
+            apiKey = provider.apiKey.trim().takeIf { provider.authMode == ProviderAuthModes.API_KEY }.orEmpty(),
+            authMode = provider.authMode,
             model = model.modelId.trim(),
             modelDisplayName = model.displayName.trim(),
             contextWindow = model.effectiveContextWindow,
@@ -160,12 +170,7 @@ internal object RuntimeConfigRepository {
             systemPrompt = systemPrompt,
             anthropicVersion = (provider as? AnthropicProviderSetting)?.anthropicVersion
                 ?: AnthropicProviderSetting.DEFAULT_ANTHROPIC_VERSION,
-            openAiEndpointMode = if (isCodexSubscription) OpenAiEndpointMode.RESPONSES else endpointMode,
-            authMode = if (isCodexSubscription) {
-                CodexCompatibilityProfile.AUTH_MODE
-            } else {
-                CodexCompatibilityProfile.API_KEY_AUTH_MODE
-            },
+            openAiEndpointMode = endpointMode,
             hostedWebSearchEnabled = provider.hostedWebSearchEnabled,
             thinkingEnabled = reasoningCapabilities != null,
             reasoningEffort = reasoningCapabilities?.let { ReasoningEffort.DEFAULT }

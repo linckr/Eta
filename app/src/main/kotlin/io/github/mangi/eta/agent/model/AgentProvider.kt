@@ -2,6 +2,7 @@ package io.github.mangi.eta.agent.model
 
 import io.github.mangi.eta.agent.runtime.AgentRunController
 import io.github.mangi.eta.agent.runtime.AgentTokenUsage
+import io.github.mangi.eta.data.provider.ProviderConnectionProfile
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -47,9 +48,21 @@ internal data class ProviderRequest(
     val freshConnection: Boolean = false,
     val onTransportPhase: ((String) -> Unit)? = null,
 ) {
-    val effectiveConfig: AgentModelClient.ModelConfig get() = if (!purpose.allowsTools) {
-        config.copy(hostedWebSearchEnabled = false, extraBodyJson = "", customBody = emptyList())
-    } else config
+    val effectiveConfig: AgentModelClient.ModelConfig get() {
+        val connected = ProviderConnectionProfile.forAuthMode(config.effectiveAuthMode)?.let { profile ->
+            config.copy(
+                baseUrl = profile.baseUrl,
+                providerType = profile.providerType,
+                providerSourceType = profile.sourceType,
+                openAiEndpointMode = profile.endpointMode,
+                apiKey = "",
+                authMode = config.effectiveAuthMode,
+            )
+        } ?: config
+        return if (!purpose.allowsTools) {
+            connected.copy(hostedWebSearchEnabled = false, extraBodyJson = "", customBody = emptyList())
+        } else connected
+    }
     val effectiveTools: JSONArray get() = if (purpose.allowsTools) tools else JSONArray()
 }
 

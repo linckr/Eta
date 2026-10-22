@@ -2,6 +2,7 @@ package io.github.mangi.eta.ui.model
 
 import androidx.compose.runtime.Immutable
 import io.github.mangi.eta.data.model.Model
+import io.github.mangi.eta.data.model.ProviderAuthModes
 import io.github.mangi.eta.data.model.ProviderSetting
 import io.github.mangi.eta.data.model.ProviderSourceTypes
 import io.github.mangi.eta.data.provider.ProviderSourceRegistry
@@ -53,6 +54,7 @@ internal object AgentModelPickerProjector {
         val enabledProviders = providers
             .asSequence()
             .filter(ProviderSetting::isEnabled)
+            .filter { it.authMode == ProviderAuthModes.API_KEY || ProviderAuthModes.isOAuth(it.authMode) }
             .sortedBy(ProviderSetting::sortOrder)
             .toList()
         val selectedProvider = enabledProviders.firstOrNull { it.id == selectedProviderId }
@@ -70,7 +72,8 @@ internal object AgentModelPickerProjector {
         val groups = enabledProviders
             .asSequence()
             .filter { provider ->
-                includeProvidersWithoutCredentials || provider.apiKey.isNotBlank() ||
+                includeProvidersWithoutCredentials || ProviderAuthModes.isOAuth(provider.authMode) ||
+                    (provider.authMode == ProviderAuthModes.API_KEY && provider.apiKey.isNotBlank()) ||
                     ProviderSourceRegistry.resolve(provider) == ProviderSourceTypes.OPENAI_CODEX
             }
             .mapNotNull { provider ->

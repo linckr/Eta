@@ -1,19 +1,20 @@
 package io.github.mangi.eta.data.repository
 
-import io.github.mangi.eta.data.datastore.SettingsDataStore
 import io.github.mangi.eta.data.model.Model
 import io.github.mangi.eta.data.model.ModelSource
+import io.github.mangi.eta.data.model.ProviderAuthModes
+import io.github.mangi.eta.data.model.ProviderSetting
+import io.github.mangi.eta.agent.auth.ProviderAuthException
+import io.github.mangi.eta.data.datastore.SettingsDataStore
 import io.github.mangi.eta.data.provider.BuiltinProviders
 import java.util.UUID
-import java.util.Locale
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 internal object ModelRepository {
-    private val mutationMutex = Mutex()
-
     fun modelsByProviderFlow(providerId: String): Flow<List<Model>> =
         allModelsByProviderFlow(providerId).map { models ->
             models.filter { it.isEnabled }.sortedBy { it.sortOrder }
@@ -33,7 +34,7 @@ internal object ModelRepository {
             ?.sortedBy { it.sortOrder }
             .orEmpty()
 
-    suspend fun saveModel(providerId: String, draft: Model): Model = mutationMutex.withLock {
+    suspend fun saveModel(providerId: String, draft: Model): Model = ProviderRepository.mutationMutex.withLock {
         val models = currentModels(providerId)
         val modelId = draft.modelId.trim()
         val displayName = draft.displayName.trim()
@@ -73,135 +74,99 @@ internal object ModelRepository {
             providerId,
             models.filterNot { it.id == saved.id } + saved,
         )
-        if (providerId == BuiltinProviders.OPENAI_CODEX_ID) {
-            SettingsDataStore.unhideRemoteModelId(providerId, modelId.normalizedModelId())
-        }
         saved
     }
 
-    suspend fun deleteModel(providerId: String, modelId: String) = mutationMutex.withLock {
-        val models = currentModels(providerId)
-        hideDeletedCodexRemoteModels(providerId, models.filter { it.id == modelId })
-        ProviderRepository.replaceModels(
-            providerId,
-            models.filterNot { it.id == modelId },
-        )
+    suspend fun deleteModel(providerId: String, modelId: String) {
+        hideLegacyRemoteModels(providerId, setOf(modelId))
+        ProviderRepository.mutationMutex.withLock {
+            ProviderRepository.replaceModels(
+                providerId,
+                currentModels(providerId).filterNot { it.id == modelId },
+            )
+        }
         ProviderRepository.repairSelection()
     }
 
     suspend fun deleteModels(providerId: String, modelIds: Set<String>) {
         if (modelIds.isEmpty()) return
-        mutationMutex.withLock {
-            val models = currentModels(providerId)
-            hideDeletedCodexRemoteModels(providerId, models.filter { it.id in modelIds })
+        hideLegacyRemoteModels(providerId, modelIds)
+        ProviderRepository.mutationMutex.withLock {
             ProviderRepository.replaceModels(
                 providerId,
-                models.filterNot { it.id in modelIds },
+                currentModels(providerId).filterNot { it.id in modelIds },
             )
-            ProviderRepository.repairSelection()
         }
+        ProviderRepository.repairSelection()
     }
 
+    /** 拉取结果里尚未添加到该服务商的模型；聚合平台动辄上百个，由用户挑选后再加入。 */
     suspend fun newRemoteModels(providerId: String, fetched: List<Model>): List<Model> {
-        val existing = currentModels(providerId).mapTo(mutableSetOf()) { it.modelId.normalizedModelId() }
         val hidden = if (providerId == BuiltinProviders.OPENAI_CODEX_ID) SettingsDataStore.hiddenRemoteModelIds(providerId) else emptySet()
-        return fetched.filter { it.modelId.isNotBlank() }.distinctBy { it.modelId.normalizedModelId() }
+        val existing = currentModels(providerId).mapTo(mutableSetOf()) { it.modelId.normalizedModelId() }
+        return fetched
+            .filter { it.modelId.isNotBlank() }
+            .distinctBy { it.modelId.normalizedModelId() }
             .filterNot { it.modelId.normalizedModelId() in existing || it.modelId.normalizedModelId() in hidden }
     }
 
+    /** API Key 目录可直接同步；账号目录必须携带认证会话绑定。 */
     suspend fun syncRemoteModels(
         providerId: String,
         fetched: List<Model>,
-        adoptedModelIds: Set<String> = fetched.map { it.modelId }.toSet(),
+        adoptedModelIds: Set<String> = fetched.mapTo(mutableSetOf()) { it.modelId },
         preserveCatalogModels: Boolean = true,
-    ): RemoteModelSyncResult =
-        mutationMutex.withLock {
-            val adopted = adoptedModelIds.mapTo(mutableSetOf()) { it.normalizedModelId() }
-            val fetchedByKey = fetched
-                .asSequence()
-                .filter { it.modelId.isNotBlank() }
-                .distinctBy { it.modelId.normalizedModelId() }
-                .associateBy { it.modelId.normalizedModelId() }
-            if (fetchedByKey.isEmpty()) {
-                return@withLock RemoteModelSyncResult(applied = false)
-            }
-            val hiddenIds = if (providerId == BuiltinProviders.OPENAI_CODEX_ID) {
-                SettingsDataStore.hiddenRemoteModelIds(providerId)
-            } else {
-                emptySet()
-            }
-            val remoteByKey = fetchedByKey.filterKeys { it !in hiddenIds }
-
-            val existing = currentModels(providerId)
-            val consumed = mutableSetOf<String>()
-            val merged = buildList {
-                existing.forEach { stored ->
-                    val key = stored.modelId.normalizedModelId()
-                    val remote = remoteByKey[key]
-                    when {
-                        remote != null -> {
-                            consumed += key
-                            add(
-                                remote.copy(
-                                    id = stored.id,
-                                    modelId = remote.modelId.trim(),
-                                    displayName = remote.displayName.trim().ifBlank { remote.modelId.trim() },
-                                    isEnabled = stored.isEnabled,
-                                    isBuiltIn = if (!preserveCatalogModels && stored.source == ModelSource.CATALOG) {
-                                        false
-                                    } else {
-                                        stored.isBuiltIn || remote.isBuiltIn
-                                    },
-                                    customHeaders = stored.customHeaders,
-                                    customBody = stored.customBody,
-                                    // 用户填过的窗口优先；空着时用远端标注补上，省去手填。
-                                    contextWindowOverride = stored.contextWindowOverride,
-                                    reasoningOverride = stored.reasoningOverride,
-                                    reasoningCapabilitiesOverride = stored.reasoningCapabilitiesOverride,
-                                    source = if (!preserveCatalogModels && stored.source == ModelSource.CATALOG) {
-                                        ModelSource.REMOTE
-                                    } else {
-                                        stored.source
-                                    },
-                                    createdAt = stored.createdAt,
-                                )
-                            )
-                        }
-                        stored.source != ModelSource.REMOTE &&
-                            (preserveCatalogModels || stored.source != ModelSource.CATALOG) -> add(stored)
-                    }
-                }
-                remoteByKey.forEach { (key, remote) ->
-                    if (key !in consumed && key in adopted) {
-                        add(
-                            remote.copy(
-                                id = remote.id.ifBlank(::newId),
-                                modelId = remote.modelId.trim(),
-                                displayName = remote.displayName.trim().ifBlank { remote.modelId.trim() },
-                                isBuiltIn = false,
-                                contextWindowOverride = remote.contextWindowOverride,
-                                source = ModelSource.REMOTE,
-                            )
-                        )
-                    }
-                }
-            }.mapIndexed { index, model -> model.copy(sortOrder = index) }
-
-            ProviderRepository.replaceModels(providerId, merged)
-            ProviderRepository.repairSelection()
-            RemoteModelSyncResult(
-                applied = true,
-                fetchedCount = fetchedByKey.size,
-                addedCount = merged.count { model -> existing.none { it.id == model.id } },
-                removedCount = existing.count { stored ->
-                    stored.source == ModelSource.REMOTE &&
-                        stored.modelId.normalizedModelId() !in remoteByKey
-                },
-            )
+    ): RemoteModelSyncResult {
+        val result = ProviderRepository.mutationMutex.withLock {
+            val provider = requireNotNull(ProviderRepository.providerById(providerId)) { "Provider 不存在" }
+            require(provider.authMode == ProviderAuthModes.API_KEY) { "账号模型目录必须绑定当前登录状态，请重新拉取" }
+            applyRemoteModels(provider, fetched, adoptedModelIds, preserveCatalogModels)
         }
+        if (result.applied) ProviderRepository.repairSelection()
+        return result
+    }
+
+    suspend fun syncRemoteCatalog(
+        catalog: RemoteModelCatalog,
+        adoptedModelIds: Set<String> = catalog.models.mapTo(mutableSetOf()) { it.modelId },
+    ): RemoteModelSyncResult = withContext(Dispatchers.IO) {
+        val result = ProviderRepository.mutationMutex.withLock {
+            val provider = requireNotNull(ProviderRepository.providerById(catalog.connection.id)) { "Provider 不存在" }
+            require(catalog.matches(provider)) { "服务商连接已变更，请重新拉取模型" }
+            val binding = catalog.accountBinding
+            if (ProviderAuthModes.isOAuth(provider.authMode)) {
+                if (binding == null || binding.providerId != provider.id || binding.authMode != provider.authMode ||
+                    !ProviderCredentialRepository.isCurrent(binding)
+                ) throw ProviderAuthException("oauth_session_changed", "登录状态已变更，请重新拉取模型")
+            } else {
+                require(binding == null) { "API Key 模型目录不能携带账号绑定" }
+            }
+            applyRemoteModels(provider, catalog.models, adoptedModelIds)
+        }
+        if (result.applied) ProviderRepository.repairSelection()
+        result
+    }
+
+    private suspend fun applyRemoteModels(
+        provider: ProviderSetting,
+        fetched: List<Model>,
+        adoptedModelIds: Set<String>,
+        preserveCatalogModels: Boolean = true,
+    ): RemoteModelSyncResult {
+        val hidden = if (provider.id == BuiltinProviders.OPENAI_CODEX_ID) SettingsDataStore.hiddenRemoteModelIds(provider.id) else emptySet()
+        val merged = reconcileRemoteModels(
+            existing = provider.models.sortedBy { it.sortOrder },
+            fetched = fetched.filterNot { it.modelId.normalizedModelId() in hidden }.map { it.copy(id = it.id.ifBlank(::newId)) },
+            adoptedModelIds = adoptedModelIds,
+            authMode = provider.authMode,
+            preserveCatalogModels = preserveCatalogModels,
+        )
+        if (merged.result.applied) ProviderRepository.replaceModels(provider.id, merged.models)
+        return merged.result
+    }
 
     suspend fun reorderModels(providerId: String, ids: List<String>) {
-        mutationMutex.withLock {
+        ProviderRepository.mutationMutex.withLock {
             val models = currentModels(providerId)
             val byId = models.associateBy { it.id }
             val orderedIds = ids.toSet()
@@ -213,23 +178,19 @@ internal object ModelRepository {
         }
     }
 
+    private suspend fun hideLegacyRemoteModels(providerId: String, ids: Set<String>) {
+        if (providerId != BuiltinProviders.OPENAI_CODEX_ID) return
+        SettingsDataStore.hideRemoteModelIds(providerId, currentModels(providerId)
+            .filter { it.id in ids && it.source == ModelSource.REMOTE }
+            .mapTo(mutableSetOf()) { it.modelId.normalizedModelId() })
+    }
+
     fun newId(): String = UUID.randomUUID().toString()
 
     private suspend fun currentModels(providerId: String): List<Model> =
         requireNotNull(ProviderRepository.providerById(providerId)) { "Provider 不存在" }
             .models
             .sortedBy { it.sortOrder }
-
-    private suspend fun hideDeletedCodexRemoteModels(providerId: String, models: List<Model>) {
-        if (providerId != BuiltinProviders.OPENAI_CODEX_ID) return
-        SettingsDataStore.hideRemoteModelIds(
-            providerId,
-            models.filter { it.source == ModelSource.REMOTE }
-                .mapTo(mutableSetOf()) { it.modelId.normalizedModelId() },
-        )
-    }
-
-    private fun String.normalizedModelId(): String = trim().lowercase(Locale.ROOT)
 }
 
 internal data class RemoteModelSyncResult(

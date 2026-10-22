@@ -9,6 +9,8 @@ import io.github.mangi.eta.data.model.ModelReasoningCapabilities
 import io.github.mangi.eta.data.model.ModelSource
 import io.github.mangi.eta.data.model.ReasoningEffort
 import io.github.mangi.eta.data.provider.BuiltinProviders
+import io.github.mangi.eta.data.model.ProviderAuthModes
+import io.github.mangi.eta.agent.auth.ProviderAuthException
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -242,6 +244,10 @@ class ModelRepositoryTest {
     fun deletedCodexRemoteModelStaysHiddenAfterRefreshIncludingAllHiddenCatalog() = runBlocking {
         ProviderRepository.ensureBuiltInsMerged()
         val providerId = BuiltinProviders.OPENAI_CODEX_ID
+        // Exercise the local hidden-model policy independently of OAuth binding validation.
+        // Account-bound catalogs are covered by the separate authenticated catalog tests.
+        val connection = ProviderRepository.providerById(providerId) as io.github.mangi.eta.data.model.OpenAiCompatibleProviderSetting
+        ProviderRepository.updateProvider(connection.copy(authMode = ProviderAuthModes.API_KEY))
         val fetched = listOf(
             Model(id = "online-one", modelId = "gpt-online-one", displayName = "One", source = ModelSource.REMOTE),
             Model(id = "online-two", modelId = "gpt-online-two", displayName = "Two", source = ModelSource.REMOTE),
@@ -262,6 +268,8 @@ class ModelRepositoryTest {
         assertTrue(ModelRepository.modelsByProvider(providerId).isEmpty())
 
         ProviderRepository.resetBuiltIn(providerId)
+        val reset = ProviderRepository.providerById(providerId) as io.github.mangi.eta.data.model.OpenAiCompatibleProviderSetting
+        ProviderRepository.updateProvider(reset.copy(authMode = ProviderAuthModes.API_KEY))
         assertTrue(ModelRepository.syncRemoteModels(providerId, fetched, preserveCatalogModels = false).applied)
         assertEquals(
             listOf("gpt-online-one", "gpt-online-two"),
@@ -285,6 +293,50 @@ class ModelRepositoryTest {
         val restored = ProviderRepository.providerById(PROVIDER_ID) as CustomProviderSetting
         assertEquals("new-key", restored.apiKey)
         assertEquals(listOf("model-a"), restored.models.map { it.modelId })
+    }
+
+    @Test
+    fun catalogCapturedBeforeAuthenticationModeChangeCannotModifyModels() = runBlocking {
+        val original = provider(models = listOf(Model(id = "kept", modelId = "kept", displayName = "保留")))
+        ProviderRepository.addProvider(original)
+        val catalog = RemoteModelCatalog(
+            listOf(Model(id = "incoming", modelId = "incoming", displayName = "旧请求结果")),
+            requireNotNull(ProviderRepository.providerById(PROVIDER_ID)), null,
+        )
+        ProviderRepository.updateProvider(original.copy(authMode = ProviderAuthModes.OPENAI_CHATGPT))
+
+        val failure = runCatching { ModelRepository.syncRemoteCatalog(catalog, setOf("incoming")) }.exceptionOrNull()
+        assertTrue(failure is IllegalArgumentException)
+        assertEquals(listOf("kept"), ModelRepository.modelsByProvider(PROVIDER_ID).map { it.id })
+    }
+
+    @Test
+    fun codexCatalogWithoutAnAccountBindingIsRejectedBeforeDatabaseMutation() = runBlocking {
+        val original = provider(models = listOf(Model(id = "kept", modelId = "kept", displayName = "保留")))
+            .copy(authMode = ProviderAuthModes.OPENAI_CHATGPT)
+        ProviderRepository.addProvider(original)
+        val catalog = RemoteModelCatalog(emptyList(), requireNotNull(ProviderRepository.providerById(PROVIDER_ID)), null)
+
+        val failure = runCatching { ModelRepository.syncRemoteCatalog(catalog, emptySet()) }.exceptionOrNull()
+        assertTrue(failure is ProviderAuthException)
+        assertEquals("oauth_session_changed", (failure as ProviderAuthException).code)
+        assertEquals(listOf("kept"), ModelRepository.modelsByProvider(PROVIDER_ID).map { it.id })
+    }
+
+    @Test
+    fun boundApiCatalogUsesTheCurrentConnectionAndRejectsAChangedKey() = runBlocking {
+        val original = provider().copy(apiKey = "fixture-original-key")
+        ProviderRepository.addProvider(original)
+        val catalog = RemoteModelCatalog(
+            listOf(Model(id = "remote-one", modelId = "remote-one", displayName = "远端")),
+            requireNotNull(ProviderRepository.providerById(PROVIDER_ID)), null,
+        )
+        assertTrue(ModelRepository.syncRemoteCatalog(catalog, setOf("remote-one")).applied)
+        ProviderRepository.updateProvider(original.copy(apiKey = "fixture-replacement-key"))
+
+        val failure = runCatching { ModelRepository.syncRemoteCatalog(catalog, emptySet()) }.exceptionOrNull()
+        assertTrue(failure is IllegalArgumentException)
+        assertEquals(listOf("remote-one"), ModelRepository.modelsByProvider(PROVIDER_ID).map { it.id })
     }
 
     private suspend fun addEmptyProvider() {

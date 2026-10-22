@@ -5,6 +5,8 @@ import io.github.mangi.eta.agent.runtime.AgentRunController
 import io.github.mangi.eta.data.model.CustomBody
 import io.github.mangi.eta.data.model.ModelReasoningCapabilities
 import io.github.mangi.eta.data.model.OpenAiEndpointMode
+import io.github.mangi.eta.data.model.ProviderAuthModes
+import io.github.mangi.eta.data.provider.ProviderConnectionProfile
 import io.github.mangi.eta.data.model.ReasoningEffort
 import java.io.OutputStream
 import java.net.InetSocketAddress
@@ -80,6 +82,29 @@ class OpenAiResponsesProviderTest {
 
     @Test
     fun codexRequestSendsSelectedModelId() {
+        val configured = config("http://127.0.0.1:1/forbidden-override").copy(
+            providerId = "codex-fixture",
+            authMode = CodexCompatibilityProfile.AUTH_MODE,
+            apiKey = "",
+            model = "gpt-6-sol",
+        )
+        val request = ProviderRequest(
+            configured,
+            JSONArray().put(JSONObject().put("role", "user").put("content", "收到")),
+            JSONArray(),
+        )
+        // OAuth always uses the official profile. Test its final body without credentials or IO.
+        assertEquals(ProviderAuthModes.OPENAI_CHATGPT, request.effectiveConfig.authMode)
+        assertEquals(ProviderConnectionProfile.OPENAI_CODEX.baseUrl, request.effectiveConfig.baseUrl)
+        assertEquals("", request.effectiveConfig.apiKey)
+        val body = AgentProviderRequestJson.build(request)
+        assertEquals("gpt-6-sol", body.getString("model"))
+        assertTrue(body.getBoolean("stream"))
+        assertFalse(body.getBoolean("store"))
+    }
+
+    @Test
+    fun apiKeyResponseParsesWhenReportedModelDiffersFromSelectedModel() {
         val body = event(
             "response.completed",
             JSONObject().put("response", JSONObject()
@@ -93,7 +118,7 @@ class OpenAiResponsesProviderTest {
             val result = OpenAiResponsesProvider.complete(
                 ProviderRequest(
                     config(baseUrl).copy(
-                        authMode = CodexCompatibilityProfile.AUTH_MODE,
+                        authMode = ProviderAuthModes.API_KEY,
                         model = "gpt-6-sol",
                     ),
                     JSONArray().put(JSONObject().put("role", "user").put("content", "收到")),

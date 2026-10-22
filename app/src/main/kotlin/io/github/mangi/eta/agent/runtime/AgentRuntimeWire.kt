@@ -16,6 +16,7 @@ import io.github.mangi.eta.data.model.CustomBody
 import io.github.mangi.eta.data.model.CustomHeader
 import io.github.mangi.eta.data.model.ModelReasoningCapabilities
 import io.github.mangi.eta.data.model.ProviderSourceTypes
+import io.github.mangi.eta.data.model.ProviderAuthModes
 import io.github.mangi.eta.data.model.ReasoningEffort
 import java.io.Closeable
 import java.util.concurrent.atomic.AtomicBoolean
@@ -316,19 +317,9 @@ internal object AgentRuntimeWire {
         putString(KEY_PROVIDER_NAME, request.config.providerName)
         putString(KEY_PROVIDER_TYPE, request.config.providerType)
         putString(KEY_PROVIDER_SOURCE_TYPE, request.config.providerSourceType)
-        putString(KEY_AUTH_MODE, request.config.authMode)
+        putString(KEY_AUTH_MODE, request.config.effectiveAuthMode)
         putString(KEY_BASE_URL, request.config.baseUrl)
-        putString(
-            KEY_API_KEY,
-            if (request.config.authMode == CodexCompatibilityProfile.AUTH_MODE ||
-                request.config.providerSourceType == ProviderSourceTypes.OPENAI_CODEX ||
-                request.config.providerId == io.github.mangi.eta.data.provider.BuiltinProviders.OPENAI_CODEX_ID
-            ) {
-                ""
-            } else {
-                request.config.apiKey
-            },
-        )
+        putString(KEY_API_KEY, request.config.apiKey.takeIf { request.config.effectiveAuthMode == ProviderAuthModes.API_KEY }.orEmpty())
         putString(KEY_MODEL, request.config.model)
         putString(KEY_MODEL_DISPLAY_NAME, request.config.modelDisplayName)
         putString("operation", request.operation)
@@ -475,11 +466,11 @@ internal object AgentRuntimeWire {
                 providerType = bundle.getString(KEY_PROVIDER_TYPE).orEmpty()
                     .ifBlank { io.github.mangi.eta.data.model.ProviderTypes.OPENAI_COMPATIBLE },
                 providerSourceType = bundle.getString(KEY_PROVIDER_SOURCE_TYPE).orEmpty(),
-                authMode = bundle.getString(KEY_AUTH_MODE)
-                    ?.takeIf { it in setOf(CodexCompatibilityProfile.AUTH_MODE, CodexCompatibilityProfile.API_KEY_AUTH_MODE) }
-                    ?: CodexCompatibilityProfile.API_KEY_AUTH_MODE,
                 baseUrl = bundle.getString(KEY_BASE_URL).orEmpty(),
-                apiKey = bundle.getString(KEY_API_KEY).orEmpty(),
+                apiKey = bundle.getString(KEY_API_KEY).orEmpty().takeIf {
+                    bundle.getString(KEY_AUTH_MODE, ProviderAuthModes.API_KEY) == ProviderAuthModes.API_KEY
+                }.orEmpty(),
+                authMode = bundle.getString(KEY_AUTH_MODE) ?: ProviderAuthModes.API_KEY,
                 model = bundle.getString(KEY_MODEL).orEmpty(),
                 modelDisplayName = bundle.getString(KEY_MODEL_DISPLAY_NAME).orEmpty(),
                 contextWindow = bundle.optionalInt(KEY_CONTEXT_WINDOW),

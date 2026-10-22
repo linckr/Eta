@@ -27,7 +27,7 @@ import androidx.room.migration.Migration
         CharacterEntity::class,
         UserPersonaEntity::class,
     ],
-    version = 25,
+    version = 26,
     exportSchema = false,
 )
 internal abstract class EtaDatabase : RoomDatabase() {
@@ -70,6 +70,7 @@ internal abstract class EtaDatabase : RoomDatabase() {
                         MIGRATION_22_23,
                         MIGRATION_23_24,
                         MIGRATION_24_25,
+                        MIGRATION_22_26, MIGRATION_23_26, MIGRATION_24_26, MIGRATION_25_26,
                     )
                     .addCallback(object : Callback() {
                         override fun onCreate(db: androidx.sqlite.db.SupportSQLiteDatabase) { createTextChunkCleanup(db) }
@@ -134,6 +135,35 @@ internal abstract class EtaDatabase : RoomDatabase() {
 
         internal val MIGRATION_23_24 = Migration(23, 24) { database ->
             database.execSQL("ALTER TABLE model_providers ADD COLUMN request_byte_budget INTEGER")
+        }
+
+        // Version 23 had two published identities: official auth_mode and local input budgets.
+        // Converge by actual columns rather than assuming the version identifies its schema.
+        internal val MIGRATION_22_26 = Migration(22, 26) { mergeProviderSchema(it) }
+        internal val MIGRATION_23_26 = Migration(23, 26) { mergeProviderSchema(it) }
+        internal val MIGRATION_24_26 = Migration(24, 26) { mergeProviderSchema(it) }
+        internal val MIGRATION_25_26 = Migration(25, 26) { mergeProviderSchema(it) }
+
+        private fun mergeProviderSchema(database: androidx.sqlite.db.SupportSQLiteDatabase) {
+            fun addMissing(table: String, column: String, declaration: String) {
+                val columns = database.query("PRAGMA table_info(`$table`)").use { cursor ->
+                    buildSet { while (cursor.moveToNext()) add(cursor.getString(cursor.getColumnIndexOrThrow("name"))) }
+                }
+                check(columns.isNotEmpty()) { "Required provider table missing" }
+                if (column !in columns) database.execSQL("ALTER TABLE `$table` ADD COLUMN `$column` $declaration")
+            }
+            addMissing("provider_models", "context_window_kind", "TEXT NOT NULL DEFAULT 'unknown'")
+            addMissing("provider_models", "input_token_limit", "INTEGER")
+            addMissing("model_providers", "request_byte_budget", "INTEGER")
+            addMissing("model_providers", "request_send_policy_json", "TEXT NOT NULL DEFAULT '{}'")
+            addMissing("model_providers", "auth_mode", "TEXT NOT NULL DEFAULT 'api_key'")
+            database.execSQL("CREATE TABLE IF NOT EXISTS compaction_failures (" +
+                "`key` TEXT NOT NULL PRIMARY KEY, sourceDigest TEXT NOT NULL, " +
+                "policyVersion INTEGER NOT NULL, algorithmVersion INTEGER NOT NULL, " +
+                "failureCode TEXT NOT NULL, failedAtMs INTEGER NOT NULL, " +
+                "requestBytes INTEGER NOT NULL, estimatedTokens INTEGER NOT NULL)")
+            database.execSQL("UPDATE model_providers SET auth_mode = 'openai_chatgpt' " +
+                "WHERE auth_mode = 'api_key' AND (id = 'builtin-openai-codex' OR LOWER(RTRIM(base_url, '/')) = 'https://chatgpt.com/backend-api/codex')")
         }
 
         private fun createTextChunkCleanup(database: androidx.sqlite.db.SupportSQLiteDatabase) {

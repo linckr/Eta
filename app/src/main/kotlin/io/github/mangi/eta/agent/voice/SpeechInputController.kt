@@ -65,9 +65,10 @@ internal class SpeechInputController(
         mutableState.value = SpeechInputState(phase = EtaSpeechPhase.STARTING, progress = "正在连接")
         job = scope.launch(Dispatchers.Main.immediate) {
             try {
-                lease = SpeechAudioLease(context) { cancel() }.also { it.acquire(playback = false) }
                 val config = settings ?: SpeechSettingsRepository.settings()
-                val secrets = credentials ?: if (config.asr == AsrProvider.SYSTEM || config.asr == AsrProvider.BREENO) SpeechCredentials()
+                if (!config.recognitionEnabled) return@launch
+                lease = SpeechAudioLease(context) { cancel() }.also { it.acquire(playback = false) }
+                val secrets = credentials ?: if ((config.asr == AsrProvider.SYSTEM || config.asr == AsrProvider.BREENO)) SpeechCredentials()
                     else SpeechSettingsRepository.credentials(context)
                 validateSpeechSettings(config, secrets, synthesis = false)
                 val endpointSilenceMs = if (automaticEndpoint && !holdToTalk) config.autoSendSilenceMs else 0
