@@ -1,0 +1,296 @@
+diff --git a/main.go b/main.go
+index f0a9c9a..a1ee140 100644
+--- a/main.go
++++ b/main.go
+@@ -143,7 +143,11 @@ func isTransientNetworkError(err error) bool {
+ // 返回的 cancel 用于在流式读取结束后取消上游 context（调用方负责）。
+ func doUpstreamRequest(r *http.Request, acc *Account, prof *upstreamProfile, upstreamBytes []byte, reqID uint64, traceID string) (*http.Response, context.CancelFunc, error) {
+ 	var lastErr error
+-	for try := 0; try <= upstreamTransientRetries; try++ {
++	retries := upstreamTransientRetries
++	if etaOneShot(r) != nil {
++		retries = 0
++	}
++	for try := 0; try <= retries; try++ {
+ 		upstreamCtx, upstreamCancel := context.WithCancel(r.Context())
+ 		var headersWritten, bodyWritten atomic.Bool
+ 		trace := &httptrace.ClientTrace{
+@@ -172,7 +176,12 @@ func doUpstreamRequest(r *http.Request, acc *Account, prof *upstreamProfile, ups
+ 				traceID, reqID, acc.Path, try, upstreamTransientRetries, safeDebugError(lastErr))
+ 		}
+ 
+-		resp, err := cfg.HttpClient.Do(req)
++		var resp *http.Response
++		if state := etaOneShot(r); state != nil {
++			resp, err = etaOneShotDo(cfg.HttpClient, req, state)
++		} else {
++			resp, err = cfg.HttpClient.Do(req)
++		}
+ 		if err == nil {
+ 			return resp, upstreamCancel, nil
+ 		}
+@@ -190,7 +199,7 @@ func doUpstreamRequest(r *http.Request, acc *Account, prof *upstreamProfile, ups
+ 			})
+ 			return nil, nil, err
+ 		}
+-		if try < upstreamTransientRetries {
++		if try < retries {
+ 			debugEvent(r, "warn", "upstream_send_retry", map[string]any{
+ 				"retry": try + 1, "reason": "request_headers_not_written",
+ 				"business_impact": "换新连接重试尚未发出的模型请求",
+@@ -2991,7 +3000,7 @@ func runServe() {
+ 	listenAddr := fmt.Sprintf("%s:%d", cfg.Addr, cfg.Port)
+ 	server := &http.Server{
+ 		Addr:        listenAddr,
+-		Handler:     requestAuditMiddleware(corsMiddleware(authMiddleware(mux))),
++		Handler:     requestAuditMiddleware(corsMiddleware(authMiddleware(etaOneShotMiddleware(mux)))),
+ 		ReadTimeout: 120 * time.Second,
+ 		// WriteTimeout 覆盖「读完请求头 → 响应写完」的总时长。流式对话可能持续数分钟，
+ 		// 原来的 300s 会给长流设硬上限并中途掐断，因此这里不限总时长，
+@@ -3240,6 +3249,9 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
+ 	var lastRateErr string
+ 	var lastAuthErr string
+ 	attempted := make(map[*Account]bool, poolSize)
++	if etaOneShot(r) != nil {
++		poolSize = 1
++	}
+ 	for attempt := 0; attempt < poolSize; attempt++ {
+ 		acc, selection, err := nextAccountForModel(modelName, attempted)
+ 		if err != nil {
+@@ -3328,6 +3340,13 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
+ 			return nil, nil, nil, false
+ 		}
+ 
++		if etaOneShot(r) != nil && resp.StatusCode >= 300 {
++			resp.Body.Close()
++			upstreamCancel()
++			writeUpstreamError(w, r, resp.StatusCode, "one_shot_upstream_rejected", "Single attempt rejected; no account failover or replay performed")
++			return nil, nil, nil, false
++		}
++
+ 		// 上游非 200 响应处理
+ 		if resp.StatusCode >= 400 {
+ 			errBody, _ := io.ReadAll(resp.Body)
+@@ -3672,6 +3691,7 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
+ 	modelIDs, source := mergedModelIDs()
+ 	w.Header().Set("Content-Type", "application/json")
+ 	_ = json.NewEncoder(w).Encode(map[string]any{
++		"eta_one_shot": "v1",
+ 		"status":       "healthy",
+ 		"timestamp":    time.Now().Unix(),
+ 		"version":      version,
+diff --git a/eta_oneshot.go b/eta_oneshot.go
+new file mode 100644
+--- /dev/null
++++ b/eta_oneshot.go
+@@ -0,0 +1,62 @@
++package main
++
++import (
++	"context"
++	"errors"
++	"net/http"
++	"sync/atomic"
++)
++
++type etaOneShotKey struct{}
++type etaOneShotState struct{ used atomic.Bool }
++
++var errEtaOneShotConsumed = errors.New("one-shot upstream attempt already consumed")
++
++func etaOneShot(r *http.Request) *etaOneShotState {
++	state, _ := r.Context().Value(etaOneShotKey{}).(*etaOneShotState)
++	return state
++}
++
++// The header can only restrict a request, never grant an application-side permit.
++func etaOneShotMiddleware(next http.Handler) http.Handler {
++	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		values := r.Header.Values("X-Eta-One-Shot")
++		if len(values) == 0 {
++			next.ServeHTTP(w, r)
++			return
++		}
++		if len(values) != 1 || values[0] != "v1" {
++			http.Error(w, "Unsupported one-shot contract", http.StatusBadRequest)
++			return
++		}
++		w.Header().Set("X-Eta-One-Shot-Accepted", "v1")
++		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), etaOneShotKey{}, &etaOneShotState{})))
++	})
++}
++
++func etaOneShotDo(client *http.Client, request *http.Request, state *etaOneShotState) (*http.Response, error) {
++	if !state.used.CompareAndSwap(false, true) {
++		return nil, errEtaOneShotConsumed
++	}
++	// Non-replayable POST bodies and a new connection suppress transport-level resend.
++	request.GetBody = nil
++	request.Close = true
++	request.Header.Del("Idempotency-Key")
++	request.Header.Del("X-Idempotency-Key")
++	single := *client
++	transport := client.Transport
++	if transport == nil {
++		transport = http.DefaultTransport
++	}
++	if base, ok := transport.(*http.Transport); ok {
++		strict := base.Clone()
++		strict.DisableKeepAlives = true
++		strict.ForceAttemptHTTP2 = false
++		strict.Protocols = new(http.Protocols)
++		strict.Protocols.SetHTTP1(true)
++		single.Transport = strict
++		defer strict.CloseIdleConnections()
++	}
++	single.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
++	return single.Do(request)
++}
+diff --git a/eta_oneshot_test.go b/eta_oneshot_test.go
+new file mode 100644
+--- /dev/null
++++ b/eta_oneshot_test.go
+@@ -0,0 +1,143 @@
++package main
++
++import (
++	"bytes"
++	"context"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"sync/atomic"
++	"testing"
++	"time"
++)
++
++func withEtaDecision(path string) *http.Request {
++	r := httptest.NewRequest(http.MethodPost, path, nil)
++	return r.WithContext(context.WithValue(r.Context(), etaOneShotKey{}, &etaOneShotState{}))
++}
++
++func TestEtaOneShotRejectsUnknownHeaderAndSharesSingleState(t *testing.T) {
++	var called int
++	handler := etaOneShotMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		called++
++		if etaOneShot(r) == nil {
++			t.Fatal("missing strict context")
++		}
++		if etaOneShot(r.Clone(r.Context())) != etaOneShot(r) {
++			t.Fatal("cloning reset authorization")
++		}
++	}))
++	bad := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
++	bad.Header.Set("X-Eta-One-Shot", "unknown")
++	w := httptest.NewRecorder()
++	handler.ServeHTTP(w, bad)
++	if w.Code != 400 || called != 0 {
++		t.Fatal("unsupported contract dispatched")
++	}
++	good := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
++	good.Header.Set("X-Eta-One-Shot", "v1")
++	w = httptest.NewRecorder()
++	handler.ServeHTTP(w, good)
++	if called != 1 || w.Header().Get("X-Eta-One-Shot-Accepted") != "v1" {
++		t.Fatal("contract not acknowledged")
++	}
++}
++
++func TestEtaOneShotNeverRetriesTransientFailure(t *testing.T) {
++	oldClient, oldRetries, oldBackoff := cfg.HttpClient, upstreamTransientRetries, upstreamRetryBackoff
++	defer func() {
++		cfg.HttpClient = oldClient
++		upstreamTransientRetries = oldRetries
++		upstreamRetryBackoff = oldBackoff
++	}()
++	var calls atomic.Int32
++	cfg.HttpClient = &http.Client{Transport: retryTransportFunc(func(r *http.Request) (*http.Response, error) {
++		calls.Add(1)
++		if r.GetBody != nil || !r.Close {
++			t.Fatal("request can be replayed")
++		}
++		return nil, io.EOF
++	})}
++	upstreamTransientRetries = 3
++	upstreamRetryBackoff = time.Millisecond
++	acc := &Account{Auth: &StoredAuth{Edition: "cn", Auth: StoredTokens{AccessToken: "fixture"}}}
++	r := withEtaDecision("/v1/chat/completions")
++	_, _, err := doUpstreamRequest(r, acc, &profileCN, []byte(`{"model":"fixture"}`), 1, "fixture")
++	if err == nil || calls.Load() != 1 {
++		t.Fatalf("calls=%d err=%v", calls.Load(), err)
++	}
++	_, _, _ = doUpstreamRequest(r, acc, &profileCN, []byte(`{"model":"fixture"}`), 1, "fixture")
++	if calls.Load() != 1 {
++		t.Fatal("same inbound request replayed")
++	}
++}
++
++func TestEtaOneShotStatusAndRedirectMatrix(t *testing.T) {
++	for _, path := range []string{"/v1/chat/completions", "/v1/responses", "/v1/messages"} {
++		for _, status := range []int{200, 307, 308, 401, 408, 429, 503} {
++			t.Run(path+"/"+http.StatusText(status), func(t *testing.T) {
++				var calls atomic.Int32
++				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++					calls.Add(1)
++					w.Header().Set("Location", "/redirect-target")
++					w.WriteHeader(status)
++				}))
++				defer server.Close()
++				req, err := http.NewRequest(http.MethodPost, server.URL+path, bytes.NewReader([]byte(`{"model":"fixture"}`)))
++				if err != nil {
++					t.Fatal(err)
++				}
++				resp, err := etaOneShotDo(server.Client(), req, &etaOneShotState{})
++				if err != nil {
++					t.Fatal(err)
++				}
++				resp.Body.Close()
++				if calls.Load() != 1 || resp.StatusCode != status {
++					t.Fatalf("calls=%d status=%d", calls.Load(), resp.StatusCode)
++				}
++			})
++		}
++	}
++}
++
++func TestEtaOneShotAccountPoolDoesNotFailOver(t *testing.T) {
++	for _, status := range []int{401, 408, 429, 503, 307} {
++		t.Run(http.StatusText(status), func(t *testing.T) {
++			chdirTemp(t)
++			var calls atomic.Int32
++			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				calls.Add(1)
++				w.Header().Set("Location", "/redirected")
++				w.WriteHeader(status)
++				_, _ = io.WriteString(w, `{"error":{"data":{"code":14018,"msg":"fixture"}}}`)
++			}))
++			defer server.Close()
++			oldBase, oldOrigin, oldClient := profileCN.Base, profileCN.Origin, cfg.HttpClient
++			accountMu.Lock()
++			oldAccounts, oldRR := accounts, rrIndex
++			a := &Account{Path: "fixture-a.json", Auth: &StoredAuth{Edition: "cn", Auth: StoredTokens{AccessToken: "fixture-a", ExpiresAt: time.Now().Add(time.Hour).Unix()}}}
++			b := &Account{Path: "fixture-b.json", Auth: &StoredAuth{Edition: "cn", Auth: StoredTokens{AccessToken: "fixture-b", ExpiresAt: time.Now().Add(time.Hour).Unix()}}}
++			accounts, rrIndex = []*Account{a, b}, 0
++			accountMu.Unlock()
++			profileCN.Base, profileCN.Origin, cfg.HttpClient = server.URL, server.URL, server.Client()
++			defer func() {
++				profileCN.Base, profileCN.Origin, cfg.HttpClient = oldBase, oldOrigin, oldClient
++				accountMu.Lock()
++				accounts, rrIndex = oldAccounts, oldRR
++				accountMu.Unlock()
++			}()
++			req := withEtaDecision("/v1/chat/completions")
++			rec := httptest.NewRecorder()
++			resp, _, _, ok := upstreamChat(rec, req, 1, "fixture", []byte(`{"model":"fixture"}`), time.Now())
++			if resp != nil {
++				resp.Body.Close()
++			}
++			if ok || calls.Load() != 1 {
++				t.Fatalf("ok=%v calls=%d status=%d", ok, calls.Load(), rec.Code)
++			}
++			if a.Auth == nil || b.Auth == nil {
++				t.Fatal("one-shot error invalidated account")
++			}
++		})
++	}
++}
