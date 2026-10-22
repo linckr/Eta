@@ -17,6 +17,7 @@ import io.github.mangi.eta.data.model.ModelSource
 import io.github.mangi.eta.data.model.OpenAiCompatibleProviderSetting
 import io.github.mangi.eta.data.model.OpenAiEndpointMode
 import io.github.mangi.eta.data.model.ProviderSetting
+import io.github.mangi.eta.data.model.RequestSendPolicy
 import io.github.mangi.eta.data.model.ProviderTypes
 import io.github.mangi.eta.data.provider.ProviderSourceRegistry
 import kotlinx.serialization.Serializable
@@ -44,6 +45,7 @@ internal data class ProviderEntity(
     val hostedWebSearchEnabled: Boolean,
     @ColumnInfo(name = "anthropic_version") val anthropicVersion: String,
     @ColumnInfo(name = "request_byte_budget") val requestByteBudget: Int? = null,
+    @ColumnInfo(name = "request_send_policy_json", defaultValue = "'{}'") val requestSendPolicyJson: String = "{}",
 )
 
 @Serializable
@@ -123,6 +125,7 @@ internal fun ProviderSetting.toEntity(): ProviderEntity =
         },
         hostedWebSearchEnabled = hostedWebSearchEnabled,
         requestByteBudget = requestByteBudget,
+        requestSendPolicyJson = ProviderJson.encodeSendPolicy(requestSendPolicy),
         anthropicVersion = when (this) {
             is AnthropicProviderSetting -> anthropicVersion
             else -> AnthropicProviderSetting.DEFAULT_ANTHROPIC_VERSION
@@ -157,6 +160,7 @@ internal fun ProviderWithModels.toDomain(): ProviderSetting {
             customBody = ProviderJson.decodeBody(provider.customBodyJson),
             createdAt = provider.createdAt,
             requestByteBudget = provider.requestByteBudget,
+            requestSendPolicy = ProviderJson.decodeSendPolicy(provider.requestSendPolicyJson),
             anthropicVersion = provider.anthropicVersion.ifBlank {
                 AnthropicProviderSetting.DEFAULT_ANTHROPIC_VERSION
             },
@@ -177,6 +181,7 @@ internal fun ProviderWithModels.toDomain(): ProviderSetting {
             customBody = ProviderJson.decodeBody(provider.customBodyJson),
             createdAt = provider.createdAt,
             requestByteBudget = provider.requestByteBudget,
+            requestSendPolicy = ProviderJson.decodeSendPolicy(provider.requestSendPolicyJson),
             endpointMode = provider.endpointMode.ifBlank { OpenAiEndpointMode.CHAT_COMPLETIONS },
             hostedWebSearchEnabled = provider.hostedWebSearchEnabled,
         )
@@ -196,6 +201,7 @@ internal fun ProviderWithModels.toDomain(): ProviderSetting {
             customBody = ProviderJson.decodeBody(provider.customBodyJson),
             createdAt = provider.createdAt,
             requestByteBudget = provider.requestByteBudget,
+            requestSendPolicy = ProviderJson.decodeSendPolicy(provider.requestSendPolicyJson),
             endpointMode = provider.endpointMode.ifBlank { OpenAiEndpointMode.CHAT_COMPLETIONS },
             hostedWebSearchEnabled = provider.hostedWebSearchEnabled,
         )
@@ -286,6 +292,10 @@ private object ProviderJson {
     private val headersSerializer = ListSerializer(CustomHeader.serializer())
     private val bodySerializer = ListSerializer(CustomBody.serializer())
     private val stringsSerializer = ListSerializer(String.serializer())
+
+    fun encodeSendPolicy(value: RequestSendPolicy): String = json.encodeToString(RequestSendPolicy.serializer(), value)
+    fun decodeSendPolicy(raw: String): RequestSendPolicy =
+        runCatching { json.decodeFromString(RequestSendPolicy.serializer(), raw) }.getOrDefault(RequestSendPolicy())
 
     fun encodeHeaders(headers: List<CustomHeader>): String =
         json.encodeToString(headersSerializer, headers)

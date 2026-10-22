@@ -72,7 +72,10 @@ internal class ModelHttpTrace(
             addMetric("${category}_chars", event.delta.length.toLong())
             addMetric("${category}_events", 1)
             if (category != "tool") markTimes("first_${category}_ms", "last_${category}_ms")
-        } else if (event is ProviderEvent.Usage) addMetric("usage_events", 1)
+        } else if (event is ProviderEvent.Usage) {
+            addMetric("usage_events", 1)
+            if (event.contextInputTokens?.let { it > 0 } == true) addMetric("usable_input_usage_events", 1)
+        }
         delegate(event)
     }
 
@@ -122,6 +125,12 @@ internal class ModelHttpTrace(
             append(" write_completed=").append(writeCompleted)
             responseBytes?.let { append(" response_bytes=").append(it) }
             status?.let { append(" status=").append(it) }
+            val usage = streamMetrics()
+            append(" input_usage_status=").append(when {
+                (usage["usable_input_usage_events"] ?: 0) > 0 -> "available"
+                (usage["usage_events"] ?: 0) > 0 -> "partial"
+                else -> "missing"
+            })
             streamMetrics().forEach { (key, value) ->
                 if (key in ModelFailureDiagnostic.streamNumberFields) append(" ").append(key).append("=").append(value)
             }

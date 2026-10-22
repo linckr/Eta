@@ -2,6 +2,7 @@ package io.github.mangi.eta.agent.model
 
 import org.json.JSONArray
 import org.json.JSONObject
+import java.security.MessageDigest
 
 /** Transactional, lossless JSON slices. Only commit a cursor after a validated summary. */
 internal class AgentSummarySlices(history: List<AgentModelClient.ConversationMessage>) {
@@ -18,6 +19,7 @@ internal class AgentSummarySlices(history: List<AgentModelClient.ConversationMes
     }
     private data class Field(val path: List<Any>, val value: Any)
     private val fields = messages.map { message -> buildList { flatten(message, emptyList(), this) } }
+    private val prefixRoots = mutableListOf("eta-source-prefix-v1")
     data class Cursor(val batch: Int = 0, val message: Int = -1, val field: Int = 0, val character: Int = 0)
     data class Slice(val json: String, val next: Cursor)
     fun done(cursor: Cursor) = cursor.batch >= batches.size
@@ -32,6 +34,78 @@ internal class AgentSummarySlices(history: List<AgentModelClient.ConversationMes
         return if (value is String) cursor.character in 0..value.length &&
             !(cursor.character > 0 && cursor.character < value.length && value[cursor.character - 1].isHighSurrogate() && value[cursor.character].isLowSurrogate())
         else cursor.character == 0
+    }
+
+    /** Client-bound proof of only the consumed source, never of unprocessed appended history. */
+    fun sourceBinding(cursor: Cursor): AgentSummarySourceBinding {
+        require(accepts(cursor))
+        val consumed = completeMessages(cursor) ?: cursor.message
+        val digest = MessageDigest.getInstance("SHA-256")
+        fun part(value: String) {
+            val bytes = value.toByteArray(Charsets.UTF_8)
+            digest.update(bytes.size.toString().toByteArray(Charsets.US_ASCII)); digest.update(0.toByte()); digest.update(bytes)
+        }
+        fun field(field: Field, value: Any = field.value) {
+            part(JSONArray(field.path).toString())
+            part(JSONObject().put("value", value).toString())
+        }
+        part("eta-summary-consumed-source-v1")
+        part(consumed.toString())
+        // Memoize whole-message roots within this run; repeated saves do not rehash 5000-message prefixes.
+        while (prefixRoots.size <= consumed) {
+            val index = prefixRoots.size - 1
+            val messageDigest = MessageDigest.getInstance("SHA-256")
+            fun append(value: String) {
+                val bytes = value.toByteArray(Charsets.UTF_8)
+                messageDigest.update(bytes.size.toString().toByteArray(Charsets.US_ASCII))
+                messageDigest.update(0.toByte()); messageDigest.update(bytes)
+            }
+            append(prefixRoots.last()); append("message:$index")
+            fields[index].forEach { item -> append(JSONArray(item.path).toString()); append(JSONObject().put("value", item.value).toString()) }
+            prefixRoots += messageDigest.digest().joinToString("") { "%02x".format(it.toInt() and 255) }
+        }
+        part(prefixRoots[consumed])
+        if (cursor.message >= 0) {
+            val batch = batches[cursor.batch]
+            part("partial:${cursor.message}:${cursor.field}:${cursor.character}")
+            // Prior slices exposed batch_end/role/tool IDs even before these fields were consumed.
+            // Keep that structural metadata stable; body text in unconsumed messages remains editable.
+            part("batch:${batch.first}:${batch.last}")
+            batch.forEach { index ->
+                val message = messages[index]
+                part(message.optString("role")); part(message.optString("tool_call_id"))
+                AgentConversationCodec.parseToolCalls(message).forEach { call -> part(call.id); part(call.name) }
+            }
+            fields[cursor.message].take(cursor.field).forEach { field(it) }
+            val current = fields[cursor.message][cursor.field]
+            part(JSONArray(current.path).toString())
+            if (current.value is String) {
+                // length/continuation appeared in the already summarized fragment metadata.
+                // Only equal-length unseen suffix changes are safe without restating metadata.
+                part("string-length:${current.value.length}")
+                part(current.value.substring(0, cursor.character))
+            } else field(current)
+        }
+        return AgentSummarySourceBinding(consumed, messages.size,
+            digest.digest().joinToString("") { "%02x".format(it.toInt() and 255) })
+    }
+
+    /** Re-anchor a saved cursor on a new source view, then verify its consumed-prefix proof. */
+    fun restoreCursor(saved: Cursor, binding: AgentSummarySourceBinding): Cursor? {
+        if (!binding.valid()) return null
+        val restored = if (saved.message < 0) {
+            val count = binding.consumedMessages
+            when {
+                count == messages.size -> Cursor(batches.size)
+                else -> batches.indexOfFirst { it.first == count }.takeIf { it >= 0 }?.let { Cursor(it) }
+            }
+        } else {
+            if (saved.message != binding.consumedMessages) null
+            else batches.indexOfFirst { saved.message in it }.takeIf { it >= 0 }?.let { saved.copy(batch = it) }
+        } ?: return null
+        if (!accepts(restored)) return null
+        val current = sourceBinding(restored)
+        return restored.takeIf { current.consumedMessages == binding.consumedMessages && current.digest == binding.digest }
     }
 
     fun next(cursor: Cursor, limit: Int): Slice {
@@ -100,4 +174,9 @@ internal class AgentSummarySlices(history: List<AgentModelClient.ConversationMes
             else -> target += Field(path, value)
         }
     }
+}
+
+/** No source body is persisted; sourceCount is diagnostic, not an append invalidator. */
+internal data class AgentSummarySourceBinding(val consumedMessages: Int, val sourceCount: Int, val digest: String) {
+    fun valid() = consumedMessages >= 0 && sourceCount >= consumedMessages && digest.matches(Regex("[a-f0-9]{64}"))
 }

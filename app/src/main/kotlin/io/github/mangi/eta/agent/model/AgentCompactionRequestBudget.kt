@@ -17,12 +17,15 @@ internal object AgentCompactionRequestBudget {
         val input = listOfNotNull(usable, config.inputTokenLimit?.takeIf { it > 0 }).minOrNull()
         val bytes = AgentRequestBytePolicy.resolve(config, input)
         val request = AgentRequestBudget.evaluate(config, messages, JSONArray(), purpose)
-        val fits = (input == null || request.estimatedTokens <= input * 0.85) &&
-            (bytes == 0 || request.requestBytes <= bytes.toLong())
+        val byteFits = if (config.compactionPolicyVersion >= 4)
+            AgentRequestSendPolicy.allowsOriginal(config, request.requestBytes)
+        else bytes == 0 || request.requestBytes <= bytes.toLong()
+        val fits = (input == null || request.estimatedTokens <= input * 0.85) && byteFits
         return Evaluation(request, input, bytes, output, fits)
     }
     fun requireFits(config: AgentModelClient.ModelConfig, messages: JSONArray) {
         val result = evaluate(config, messages)
+        AgentRequestSendPolicy.requireAllowed(config, result.request.requestBytes)
         if (result.fits) return
         val diagnostic = JSONObject().put("code", "CONTEXT_SUMMARY_INPUT_BUDGET")
             .put("purpose", "compaction").put("request_bytes", result.request.requestBytes)

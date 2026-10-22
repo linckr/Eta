@@ -14,16 +14,18 @@ import org.json.JSONObject
 internal data class AgentCompactionCheckpoint(
     val summary: String, val cursor: AgentSummarySlices.Cursor, val completedSlices: Int, val sliceLimit: Int,
     val successStreak: Int = 0,
+    val sourceBinding: AgentSummarySourceBinding? = null,
 ) {
-    fun valid() = summary.isNotBlank() && summary != "null" && summary.length <= 12_000 &&
+    fun valid(maxSummaryBytes: Int? = null) = summary.isNotBlank() && summary != "null" && (if (maxSummaryBytes == null) summary.length <= 12_000 else summary.toByteArray(Charsets.UTF_8).size <= maxSummaryBytes) &&
         completedSlices in 1..1_000_000 && sliceLimit in 1_024..64_000 && cursor.batch >= 0 && cursor.message >= -1 &&
-        cursor.field >= 0 && cursor.character >= 0 && successStreak in 0..1
+        cursor.field >= 0 && cursor.character >= 0 && successStreak in 0..1 && (sourceBinding == null || sourceBinding.valid())
 }
 
 internal interface AgentCompactionCheckpointStore {
     fun read(key: String): AgentCompactionCheckpoint?
     fun save(key: String, checkpoint: AgentCompactionCheckpoint)
     fun clear(key: String)
+    fun portableTextStore(): AgentCompactionCheckpointStore = None
     object None : AgentCompactionCheckpointStore {
         override fun read(key: String): AgentCompactionCheckpoint? = null
         override fun save(key: String, checkpoint: AgentCompactionCheckpoint) {}
@@ -32,35 +34,50 @@ internal interface AgentCompactionCheckpointStore {
 }
 
 /** Files belong to Eta private storage. No source history, API credentials or HTTP data are written. */
-internal class FileAgentCompactionCheckpointStore(private val directory: File) : AgentCompactionCheckpointStore {
+internal class FileAgentCompactionCheckpointStore(private val directory: File, private val portable: Boolean = false) : AgentCompactionCheckpointStore {
     override fun read(key: String): AgentCompactionCheckpoint? = synchronized(lock) {
         cleanup()
         val file = target(key)
         if (!file.isFile) return@synchronized null
-        if (file.length() > MAX_BYTES) { file.delete(); return@synchronized null }
+        if (file.length() > maxRecordBytes()) { file.delete(); return@synchronized null }
+        // New checkpoints must surface storage IO failures rather than deleting valid progress.
+        val portablePayload = if (portable) file.readText(Charsets.UTF_8) else null
         val result = runCatching {
-            val json = JSONObject(file.readText(Charsets.UTF_8))
-            require(json.getString("key") == key && json.getInt("version") == 1)
+            val json = JSONObject(portablePayload ?: file.readText(Charsets.UTF_8))
+            require(json.getString("key") == key && json.getInt("version") == (if (portable) 3 else 1))
+            if (portable) require(json.getString("engine_id") == "portable-text-v4" &&
+                json.getInt("algorithm_version") == 1 && json.getInt("prompt_version") == 1 &&
+                json.getInt("canonical_version") == 1 && json.getString("validation_state") == "complete_response")
+            val binding = if (portable) json.optJSONObject("source_binding")?.let {
+                require(it.getInt("version") == 1)
+                AgentSummarySourceBinding(it.getInt("consumed_messages"), it.getInt("source_count"), it.getString("digest"))
+            } else null
             val cursor = json.getJSONObject("cursor")
             AgentCompactionCheckpoint(json.getString("summary"), AgentSummarySlices.Cursor(
                 cursor.getInt("batch"), cursor.getInt("message"), cursor.getInt("field"), cursor.getInt("character")),
-                json.getInt("completed_slices"), json.getInt("slice_limit"), json.optInt("success_streak", 0)).also { require(it.valid()) }
+                json.getInt("completed_slices"), json.getInt("slice_limit"), json.optInt("success_streak", 0), binding).also { require(it.valid(if (portable) AgentPortableTextCompaction.MAX_CAPTURE_BYTES else null)) }
         }.getOrNull()
         if (result == null) file.delete()
         result
     }
 
     override fun save(key: String, checkpoint: AgentCompactionCheckpoint) = synchronized(lock) {
-        require(checkpoint.valid())
+        require(checkpoint.valid(if (portable) AgentPortableTextCompaction.MAX_CAPTURE_BYTES else null))
         require(directory.isDirectory || directory.mkdirs())
         ownerOnly(directory, executable = true)
-        val json = JSONObject().put("key", key).put("version", 1).put("summary", checkpoint.summary)
+        val json = JSONObject().put("key", key).put("version", if (portable) 3 else 1).put("summary", checkpoint.summary)
             .put("completed_slices", checkpoint.completedSlices).put("slice_limit", checkpoint.sliceLimit)
             .put("success_streak", checkpoint.successStreak)
             .put("cursor", JSONObject().put("batch", checkpoint.cursor.batch).put("message", checkpoint.cursor.message)
                 .put("field", checkpoint.cursor.field).put("character", checkpoint.cursor.character))
+        if (portable) json.put("engine_id", "portable-text-v4").put("algorithm_version", 1)
+            .put("prompt_version", 1).put("canonical_version", 1).put("validation_state", "complete_response")
+        if (portable) checkpoint.sourceBinding?.let { binding ->
+            json.put("source_binding", JSONObject().put("version", 1).put("consumed_messages", binding.consumedMessages)
+                .put("source_count", binding.sourceCount).put("digest", binding.digest))
+        }
         val bytes = json.toString().toByteArray(Charsets.UTF_8)
-        require(bytes.size <= MAX_BYTES)
+        require(bytes.size <= maxRecordBytes())
         val temporary = File(directory, ".${UUID.randomUUID()}.tmp")
         try {
             FileOutputStream(temporary).use { stream -> ownerOnly(temporary); stream.write(bytes); stream.fd.sync() }
@@ -69,6 +86,8 @@ internal class FileAgentCompactionCheckpointStore(private val directory: File) :
         } finally { temporary.delete() }
     }
 
+    override fun portableTextStore(): AgentCompactionCheckpointStore = if (portable) this else FileAgentCompactionCheckpointStore(File(directory, "portable-v4"), true)
+
     override fun clear(key: String) { synchronized(lock) { target(key).delete() } }
     private fun target(key: String): File { require(key.matches(Regex("[a-f0-9]{64}"))); return File(directory, "$key.json") }
     private fun ownerOnly(file: File, executable: Boolean = false) {
@@ -76,10 +95,11 @@ internal class FileAgentCompactionCheckpointStore(private val directory: File) :
         file.setReadable(true, true); file.setWritable(true, true)
         if (executable) file.setExecutable(true, true)
     }
+    private fun maxRecordBytes() = if (portable) 2 * 1024 * 1024 else MAX_BYTES
     private fun cleanup() {
         val now = System.currentTimeMillis()
         val files = directory.listFiles()?.filter { it.isFile } ?: return
-        files.filter { now - it.lastModified() > MAX_AGE_MS || it.length() > MAX_BYTES }.forEach { it.delete() }
+        files.filter { now - it.lastModified() > MAX_AGE_MS || it.length() > maxRecordBytes() }.forEach { it.delete() }
         directory.listFiles()?.filter { it.isFile }?.sortedByDescending { it.lastModified() }
             ?.drop(MAX_FILES)?.forEach { it.delete() }
     }
@@ -103,6 +123,9 @@ internal data class AgentCompactionSupport(
     val callBudgetMs: Long = 120_000L,
     val hierarchical: Boolean = false,
     val treeStore: AgentCompactionTreeStore = AgentCompactionTreeStore.None,
+    val portableTextCheckpoints: AgentCompactionCheckpointStore = checkpoints.portableTextStore(),
+    val failureStore: AgentCompactionFailureStore? = null,
+    val failureScopeKey: String? = null,
 )
 
 /** A budget cancels only the current summary call, never the caller's run controller. */

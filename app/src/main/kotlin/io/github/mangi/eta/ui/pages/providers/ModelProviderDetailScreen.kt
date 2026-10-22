@@ -511,6 +511,9 @@ private fun ProviderConfigTab(
                                         anthropicVersion = draft.anthropicVersion,
                                         customHeaders = draft.headers.map { it.header },
                                         requestByteBudget = requestByteBudgetFromKiB(draft.requestByteBudgetKiB),
+                                        sendPolicyEnabled = draft.sendPolicyEnabled,
+                                        requestObservedBytes = if (draft.sendPolicyEnabled) positiveRequestBytes(draft.observedRequestBytes) else null,
+                                        requestHardLimitBytes = if (draft.sendPolicyEnabled) positiveRequestBytes(draft.hardRequestBytes) else null,
                                     )
                                 )
                             } finally {
@@ -543,7 +546,7 @@ private fun ProviderConfigTab(
                         modifier = Modifier.fillMaxWidth(),
                     )
                     Text(
-                        text = stringResource(R.string.provider_request_byte_budget_hint),
+                        text = if (draft.sendPolicyEnabled) "v4 的软预算 B：留空不派生字节压缩线；0 关闭字节软触发；正数是自定义软阈值。发送边界 L/H 和 token 容量保护仍独立生效。" else stringResource(R.string.provider_request_byte_budget_hint),
                         style = MiuixTheme.textStyles.footnote2,
                         color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
                         modifier = Modifier.padding(top = 8.dp),
@@ -561,6 +564,80 @@ private fun ProviderConfigTab(
                             color = StatusError,
                             modifier = Modifier.padding(top = 8.dp),
                         )
+                    }
+                }
+            }
+        }
+
+        item(key = "request_send_policy") {
+            ProviderSection(title = "实验性请求发送策略 v4") {
+                EtaSwitchPreference(
+                    title = "启用此服务商路由的发送边界",
+                    checked = draft.sendPolicyEnabled,
+                    onCheckedChange = { onDraftChange(draft.copy(sendPolicyEnabled = it)) },
+                )
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        text = "默认关闭，保留旧策略。启用后，原请求大小软预算 B 仍独立触发压缩；B 留空不再派生字节压缩线。发送边界 L 只限制自动发送，不代表接口保证。适用于此服务商全部模型；模型自定义请求头或请求体时不启用。修改地址、协议、凭据或请求覆盖会使旧边界失效，需重新开启保存。",
+                        style = MiuixTheme.textStyles.footnote2,
+                    )
+                    if (requestSendPolicyNeedsBootstrapReactivation(provider)) {
+                        Text(
+                            text = "此前保存的 bootstrap 发送策略已失效，不会继承旧的大边界。当前沿用旧策略，不受此 L/H 保护；请明确重新开启并保存，建立独立固定的 512 KiB bootstrap。真实成功观测值的已冻结边界不会因此缩小。",
+                            style = MiuixTheme.textStyles.footnote2,
+                            color = StatusError,
+                            modifier = Modifier.padding(top = 8.dp),
+                        )
+                    }
+                    if (draft.sendPolicyEnabled) {
+                        val excludedModels = requestSendPolicyExcludedModelNames(provider)
+                        if (excludedModels.isNotEmpty()) {
+                            Text(
+                                text = "以下模型含独立请求覆盖，将沿用旧策略，不受此 L/H 发送边界保护：${excludedModels.joinToString("、")}。",
+                                style = MiuixTheme.textStyles.footnote2,
+                                color = StatusError,
+                                modifier = Modifier.padding(top = 8.dp),
+                            )
+                        }
+                        TextField(
+                            value = draft.observedRequestBytes,
+                            onValueChange = { onDraftChange(draft.copy(observedRequestBytes = it)) },
+                            label = "已确认成功的请求大小（字节，可留空）",
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                        )
+                        TextField(
+                            value = draft.hardRequestBytes,
+                            onValueChange = { onDraftChange(draft.copy(hardRequestBytes = it)) },
+                            label = "已知接口硬限制 H（字节，未知留空）",
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                        )
+                        Text(
+                            text = "请只填写有证据的数值。观测值不是接口最大容量；留空时使用独立固定的 512 KiB bootstrap，与软预算 B 和模型窗口无关；无 H 时发送边界为 768 KiB。保存时冻结 L = anchor + 25%（增长余量最少 256 KiB、最多 512 KiB），且不超过已知 H。增长区间未经上传验证；后续成功不会自动抬高边界。",
+                            style = MiuixTheme.textStyles.footnote2,
+                            modifier = Modifier.padding(top = 8.dp),
+                        )
+                        val preview = runCatching {
+                            buildUpdatedProvider(provider, draft.name, draft.baseUrl, draft.apiKey,
+                                draft.systemPrompt, draft.isEnabled, draft.endpointMode,
+                                draft.hostedWebSearchEnabled, draft.anthropicVersion,
+                                draft.headers.map { it.header }, requestByteBudgetFromKiB(draft.requestByteBudgetKiB),
+                                true, positiveRequestBytes(draft.observedRequestBytes), positiveRequestBytes(draft.hardRequestBytes))
+                                .requestSendPolicy
+                        }.getOrNull()
+                        if (preview != null) {
+                            Text(
+                                text = if (preview.version == 4) "冻结发送边界 L：${preview.sendLimitBytes} 字节；增长余量：${preview.growthAllowanceBytes} 字节。" else "路由配置已变化；本次保存会关闭旧策略，请保存后重新开启。",
+                                style = MiuixTheme.textStyles.footnote2,
+                                modifier = Modifier.padding(top = 8.dp),
+                            )
+                            val soft = runCatching { requestByteBudgetFromKiB(draft.requestByteBudgetKiB) }.getOrNull()
+                            if (soft != null && soft > (preview.sendLimitBytes ?: Long.MAX_VALUE)) {
+                                Text(text = "软预算 B 高于发送边界 L；发送边界会先触发。", style = MiuixTheme.textStyles.footnote2)
+                            }
+                        }
+                        if (sendPolicyInputError(draft)) Text(text = "字节数必须为正整数，或留空。", color = StatusError)
                     }
                 }
             }
@@ -633,6 +710,9 @@ private fun ProviderConfigTab(
                                 anthropicVersion = draft.anthropicVersion,
                                 customHeaders = draft.headers.map { it.header },
                                 requestByteBudget = requestByteBudgetFromKiB(draft.requestByteBudgetKiB),
+                                        sendPolicyEnabled = draft.sendPolicyEnabled,
+                                        requestObservedBytes = if (draft.sendPolicyEnabled) positiveRequestBytes(draft.observedRequestBytes) else null,
+                                        requestHardLimitBytes = if (draft.sendPolicyEnabled) positiveRequestBytes(draft.hardRequestBytes) else null,
                             )
                             try {
                                 if (isNew) {

@@ -297,7 +297,9 @@ internal class AgentRuntimeRunExecutor(
                 additionalTools = runTools,
                 compactionSupport = AgentCompactionSupport(checkpoints = FileAgentCompactionCheckpointStore(
                     File(appContext.filesDir, "agent_compaction_checkpoints")), hierarchical = true,
-                    treeStore = io.github.mangi.eta.agent.model.FileAgentCompactionTreeStore(File(appContext.filesDir, "agent_compaction_tree"))),
+                    treeStore = io.github.mangi.eta.agent.model.FileAgentCompactionTreeStore(File(appContext.filesDir, "agent_compaction_tree")),
+                    failureStore = io.github.mangi.eta.data.repository.RoomCompactionFailureStore(appContext),
+                    failureScopeKey = conversationId),
                 executionContext = executor.terminalExecutionContext,
             ) { event ->
                 timing.accept(event)

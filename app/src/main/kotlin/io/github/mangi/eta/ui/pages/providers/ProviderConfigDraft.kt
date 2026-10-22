@@ -7,6 +7,7 @@ import io.github.mangi.eta.data.model.AnthropicProviderSetting
 import io.github.mangi.eta.data.model.CustomHeader
 import io.github.mangi.eta.data.model.CustomProviderSetting
 import io.github.mangi.eta.data.model.OpenAiCompatibleProviderSetting
+import io.github.mangi.eta.data.model.RequestSendPolicy
 import io.github.mangi.eta.data.model.ProviderSetting
 import java.util.UUID
 import java.math.BigDecimal
@@ -27,6 +28,9 @@ internal data class ProviderConfigDraft(
     val anthropicVersion: String,
     val headers: List<ProviderHeaderDraft> = emptyList(),
     val requestByteBudgetKiB: String = "",
+    val sendPolicyEnabled: Boolean = false,
+    val observedRequestBytes: String = "",
+    val hardRequestBytes: String = "",
 ) {
     companion object {
         fun from(provider: ProviderSetting): ProviderConfigDraft = ProviderConfigDraft(
@@ -35,6 +39,9 @@ internal data class ProviderConfigDraft(
             baseUrl = provider.baseUrl,
             apiKey = provider.apiKey,
             requestByteBudgetKiB = requestByteBudgetKiBText(provider.requestByteBudget),
+            sendPolicyEnabled = provider.requestSendPolicy.isValidFor(provider),
+            observedRequestBytes = provider.requestSendPolicy.observedBytes?.toString().orEmpty(),
+            hardRequestBytes = provider.requestSendPolicy.hardLimitBytes?.toString().orEmpty(),
             systemPrompt = provider.systemPrompt.orEmpty(),
             isEnabled = provider.isEnabled,
             endpointMode = when (provider) {
@@ -62,6 +69,9 @@ internal val ProviderConfigDraftSaver = mapSaver(
             "hostedWebSearchEnabled" to draft.hostedWebSearchEnabled,
             "anthropicVersion" to draft.anthropicVersion,
             "requestByteBudgetKiB" to draft.requestByteBudgetKiB,
+            "sendPolicyEnabled" to draft.sendPolicyEnabled,
+            "observedRequestBytes" to draft.observedRequestBytes,
+            "hardRequestBytes" to draft.hardRequestBytes,
         )
     },
     restore = { state ->
@@ -78,6 +88,9 @@ internal val ProviderConfigDraftSaver = mapSaver(
             hostedWebSearchEnabled = state.getValue("hostedWebSearchEnabled") as Boolean,
             anthropicVersion = state.getValue("anthropicVersion") as String,
             requestByteBudgetKiB = state["requestByteBudgetKiB"] as? String ?: "",
+            sendPolicyEnabled = state["sendPolicyEnabled"] as? Boolean ?: false,
+            observedRequestBytes = state["observedRequestBytes"] as? String ?: "",
+            hardRequestBytes = state["hardRequestBytes"] as? String ?: "",
         )
     },
 )
@@ -94,10 +107,13 @@ internal fun buildUpdatedProvider(
     anthropicVersion: String,
     customHeaders: List<CustomHeader>,
     requestByteBudget: Int? = source.requestByteBudget,
+    sendPolicyEnabled: Boolean? = null,
+    requestObservedBytes: Long? = source.requestSendPolicy.observedBytes,
+    requestHardLimitBytes: Long? = source.requestSendPolicy.hardLimitBytes,
 ): ProviderSetting {
     require(requestByteBudget == null || requestByteBudget >= 0) { "Invalid request byte budget" }
     val prompt = systemPrompt.trim().takeIf { it.isNotBlank() }
-    return when (source) {
+    val updated = when (source) {
         is OpenAiCompatibleProviderSetting -> source.copy(
             customHeaders = customHeaders.map { it.copy(name = it.name.trim()) },
             name = name.trim(),
@@ -131,13 +147,39 @@ internal fun buildUpdatedProvider(
             requestByteBudget = requestByteBudget,
         )
     }
+    val old = source.requestSendPolicy
+    val wanted = sendPolicyEnabled ?: (old.version == 4)
+    val policy = when {
+        !wanted -> RequestSendPolicy()
+        old.version == 4 && !old.isValidFor(source) && sendPolicyEnabled != true -> RequestSendPolicy()
+        old.version == 4 && old.isValidFor(source) && !old.isValidFor(updated) -> RequestSendPolicy() // route changes require a fresh opt-in
+        old.isValidFor(updated) && old.observedBytes == requestObservedBytes &&
+            old.hardLimitBytes == requestHardLimitBytes -> old // keep the frozen send limit
+        else -> RequestSendPolicy.freeze(updated, requestObservedBytes, requestHardLimitBytes)
+    }
+    return when (updated) {
+        is OpenAiCompatibleProviderSetting -> updated.copy(requestSendPolicy = policy)
+        is CustomProviderSetting -> updated.copy(requestSendPolicy = policy)
+        is AnthropicProviderSetting -> updated.copy(requestSendPolicy = policy)
+    }
 }
+
+internal fun positiveRequestBytes(text: String): Long? = text.trim().takeIf { it.isNotEmpty() }?.let {
+    require(it.length <= 18 && it.all(Char::isDigit))
+    it.toLong().also { value -> require(value in 1..(Long.MAX_VALUE - 524_288)) }
+}
+
+internal fun sendPolicyInputError(draft: ProviderConfigDraft): Boolean = draft.sendPolicyEnabled && runCatching {
+    positiveRequestBytes(draft.observedRequestBytes)
+    positiveRequestBytes(draft.hardRequestBytes)
+}.isFailure
 
 internal fun validateProviderDraft(context: android.content.Context, draft: ProviderConfigDraft): String? {
     if (draft.name.isBlank()) return context.getString(R.string.page_name_cannot_be_empty_ca8984)
     if (requestByteBudgetInputError(draft.requestByteBudgetKiB)) {
         return context.getString(R.string.provider_request_byte_budget_error)
     }
+    if (sendPolicyInputError(draft)) return "发送策略字节数必须为正整数，或留空。"
     val uri = runCatching { java.net.URI(draft.baseUrl.trim()) }.getOrNull()
     if (uri == null || uri.scheme !in setOf("http", "https") || uri.host.isNullOrBlank()) {
         return context.getString(R.string.page_base_url_must_be_a_valid_http_s_address_0e7d58)
@@ -159,3 +201,11 @@ internal fun requestByteBudgetFromKiB(text: String): Int? {
 
 internal fun requestByteBudgetInputError(text: String): Boolean =
     runCatching { requestByteBudgetFromKiB(text) }.isFailure
+
+/** Explicitly surface routes that do not inherit the provider's v4 L/H guard. */
+internal fun requestSendPolicyExcludedModelNames(provider: ProviderSetting): List<String> =
+    provider.models.filter { it.customHeaders.isNotEmpty() || it.customBody.isNotEmpty() }
+        .map { it.displayName.ifBlank { it.modelId } }.distinct()
+
+internal fun requestSendPolicyNeedsBootstrapReactivation(provider: ProviderSetting): Boolean =
+    provider.requestSendPolicy.let { it.version == 4 && it.observedBytes == null && !it.isValidFor(provider) }

@@ -24,6 +24,9 @@ internal class AgentContextSession(
     private val requestTools: () -> JSONArray = { JSONArray() },
     private val projectRequest: (JSONArray) -> JSONArray = { it },
     private val onBudgetLog: (String) -> Unit = AgentBudgetTelemetry::log,
+    private val failureStore: AgentCompactionFailureStore? = compactionSupport.failureStore,
+    private val failureScopeKey: String? = compactionSupport.failureScopeKey,
+    private val providerResolver: (AgentModelClient.ModelConfig) -> AgentProviderClient = ProviderClientFactory::getClient,
 ) {
     private val contextWindow = AgentContextBudget.inputBudget(config, requestPurpose)
     private var inputTokens: Int? = null
@@ -38,6 +41,19 @@ internal class AgentContextSession(
     // A failed soft byte optimization must not run again after every completed tool.
     // Run-local only: a new user turn, successful compaction or new run gets another chance.
     private var byteCompactionDeferred = false
+    private var failureRecordLoaded = false
+    private var knownFailure: AgentCompactionFailureRecord? = null
+    private val persistentFailureKey: String? by lazy {
+        val store = failureStore
+        val scope = failureScopeKey
+        if (config.compactionPolicyVersion < AgentRequestSendPolicy.VERSION || store == null || scope.isNullOrBlank()) null
+        else store.fingerprint(sequenceOf(scope,
+            // All routing, auth, body/header, token, prompt and selected-summary settings matter.
+            // Only changing observations must not reset a persistent deterministic failure.
+            config.copy(requestObservedBytes = null,
+                compactionModelConfig = config.compactionModelConfig?.copy(requestObservedBytes = null)).toString(),
+            FAILURE_ALGORITHM_VERSION.toString()))
+    }
 
     private data class PendingCompaction(
         val trigger: String,
@@ -60,11 +76,12 @@ internal class AgentContextSession(
     fun prepareForRequest(estimatedTokens: Int, requestBytes: Long? = null): Boolean {
         val window = AgentContextBudget.requirePositiveBudget(config, requestPurpose)
         val byteBudget = requestByteBudget()
-        val tokenPressure = window != null && (estimatedTokens >= window * TRIGGER_RATIO ||
-            inputTokens?.let { it >= window * TRIGGER_RATIO } == true)
-        val bytePressure = byteBudget > 0 && requestBytes?.let { it > byteBudget.toLong() } == true
+        val tokenPressure = window != null && (AgentCompactionTokenPolicy.triggered(estimatedTokens, window) ||
+            inputTokens?.let { AgentCompactionTokenPolicy.triggered(it, window) } == true)
+        val guardPressure = requestBytes?.let { AgentRequestSendPolicy.guardExceeded(config, it) } == true
+        val bytePressure = guardPressure || byteBudget > 0 && requestBytes?.let { it > byteBudget.toLong() } == true
         val reason = budgetReason(tokenPressure, bytePressure)
-        val byteGoal = AgentByteCompactionGoal.forTrigger(reason, byteBudget)
+        val byteGoal = AgentByteCompactionGoal.forPolicy(reason, byteBudget, config)
         val decisionId = newDecisionId()
         logBudget("pre", estimatedTokens, requestBytes, window, byteBudget, reason, decisionId)
         if (AnthropicEphemeralState.hasPendingToolResponse(messages)) {
@@ -79,10 +96,15 @@ internal class AgentContextSession(
             compact()
             return false
         }
-        if (reason == "bytes" && byteCompactionDeferred) {
+        val persistentByteFailure = reason == "bytes" && hasPersistentByteFailure()
+        if (reason == "bytes" && (byteCompactionDeferred || persistentByteFailure)) {
+            if (!AgentRequestSendPolicy.allowsOriginal(config, requestBytes)) {
+                AgentRequestSendPolicy.requireAllowed(config, requestBytes ?: -1)
+            }
             publishSnapshot()
             logDecision(reason, "deferred", estimatedTokens, window, requestBytes, byteBudget,
-                failureCode = "BYTE_SUMMARY_FAILED_THIS_TURN", decisionId = decisionId)
+                failureCode = if (persistentByteFailure) "BYTE_SUMMARY_KNOWN_FAILURE" else "BYTE_SUMMARY_FAILED_THIS_TURN",
+                decisionId = decisionId)
             return false
         }
         val startedAt = compactionSupport.clock()
@@ -96,9 +118,11 @@ internal class AgentContextSession(
             return true
         } catch (failure: AgentModelFailure) {
             val elapsedMs = (compactionSupport.clock() - startedAt).coerceAtLeast(0)
+            if (reason == "bytes") rememberByteFailure(failure, requestBytes, estimatedTokens)
             // An estimate is not evidence of overflow. An unavailable/unhelpful summary
             // leaves the exact original request intact for the provider to decide.
-            if (failure.code in SOFT_COMPACTION_FAILURES) {
+            if (failure.code in SOFT_COMPACTION_FAILURES &&
+                AgentRequestSendPolicy.allowsOriginal(config, requestBytes)) {
                 if (reason == "bytes") byteCompactionDeferred = true
                 logDecision(reason, "soft_noop", estimatedTokens, window, requestBytes, byteBudget,
                     failureCode = failure.code, elapsedMs = elapsedMs, decisionId = decisionId)
@@ -109,7 +133,8 @@ internal class AgentContextSession(
             // capacity overflow: a known summary/transport failure must not abort the user's
             // request. Cancellation escapes as AgentRunCancelledException, and unknown or
             // storage-related failures still propagate, so new failure codes fail closed.
-            if (reason == "bytes" && byteFallbackEligible(failure)) {
+            if (reason == "bytes" && byteFallbackEligible(failure) &&
+                AgentRequestSendPolicy.allowsOriginal(config, requestBytes)) {
                 byteCompactionDeferred = true
                 logDecision(reason, "fallback", estimatedTokens, window, requestBytes, byteBudget,
                     failureCode = failure.code, elapsedMs = elapsedMs, decisionId = decisionId)
@@ -135,8 +160,8 @@ internal class AgentContextSession(
         val byteBudget = requestByteBudget()
         val pending = pendingCompaction
         logBudget("post", estimatedTokens, requestBytes, window, byteBudget, budgetReason(
-            window != null && (estimatedTokens >= window * TRIGGER_RATIO ||
-                inputTokens?.let { it >= window * TRIGGER_RATIO } == true),
+            window != null && (AgentCompactionTokenPolicy.triggered(estimatedTokens, window) ||
+                inputTokens?.let { AgentCompactionTokenPolicy.triggered(it, window) } == true),
             byteBudget > 0 && requestBytes > byteBudget.toLong(),
         ), pending?.decisionId)
         pending?.let {
@@ -175,12 +200,84 @@ internal class AgentContextSession(
     private fun requestByteBudget(): Int =
         AgentRequestBytePolicy.resolve(config, contextWindow)
 
+    /** Hash the failed prefix once per run. Appended messages do not invalidate its identity. */
+    private fun hasPersistentByteFailure(): Boolean {
+        if (failureRecordLoaded) return knownFailure != null
+        failureRecordLoaded = true
+        val key = persistentFailureKey ?: return false
+        val store = failureStore ?: return false
+        val record = store.load(key) ?: return false
+        val count = record.sourceDigest.substringBefore(':').toIntOrNull()
+        val expected = record.sourceDigest.substringAfter(':', "")
+        val valid = record.policyVersion == config.compactionPolicyVersion &&
+            record.algorithmVersion == FAILURE_ALGORITHM_VERSION && record.failureCode in PERSISTENT_BYTE_FAILURES && count != null &&
+            count in 1..sourceMessageCount() && expected.isNotBlank() &&
+            store.fingerprint(sourceParts(count)) == expected
+        if (!valid) { store.clear(key); return false }
+        knownFailure = record
+        return true
+    }
+
+    private fun sourceParts(count: Int): Sequence<String> = sequence {
+        var included = 0
+        for (index in 0 until messages.length()) {
+            runController.throwIfCancelled()
+            val message = messages.getJSONObject(index)
+            if (message.optBoolean("_eta_observation")) continue
+            if (included++ >= count) break
+            // Bind the same durable DTO across runs. Run-only wake-screen metadata and
+            // opaque provider items never enter the summarizer's stable history either.
+            yield(canonicalSource(AgentConversationCodec.toJsonObject(AgentConversationCodec.durableMessage(message))))
+        }
+    }
+
+    private fun sourceMessageCount(): Int = (0 until messages.length()).count {
+        !messages.getJSONObject(it).optBoolean("_eta_observation")
+    }
+
+    private fun canonicalSource(value: Any?): String = when (value) {
+        is org.json.JSONObject -> value.keys().asSequence().toList().sorted().joinToString(",", "{", "}") {
+            org.json.JSONObject.quote(it) + ":" + canonicalSource(value.opt(it))
+        }
+        is JSONArray -> (0 until value.length()).joinToString(",", "[", "]") { canonicalSource(value.opt(it)) }
+        null, org.json.JSONObject.NULL -> "null"
+        is String -> org.json.JSONObject.quote(value)
+        else -> value.toString()
+    }
+
+    private fun rememberByteFailure(failure: AgentModelFailure, requestBytes: Long?, estimatedTokens: Int) {
+        if (failure.code !in PERSISTENT_BYTE_FAILURES) return
+        val key = persistentFailureKey ?: return
+        val store = failureStore ?: return
+        val count = sourceMessageCount()
+        if (count == 0 || requestBytes == null) return
+        val record = AgentCompactionFailureRecord(key, "$count:${store.fingerprint(sourceParts(count))}",
+            config.compactionPolicyVersion, FAILURE_ALGORITHM_VERSION, failure.code,
+            System.currentTimeMillis(), requestBytes, estimatedTokens)
+        store.save(record)
+        knownFailure = record
+        failureRecordLoaded = true
+    }
+
+    private fun clearPersistentByteFailure() {
+        persistentFailureKey?.let { failureStore?.clear(it) }
+        knownFailure = null
+        failureRecordLoaded = true
+    }
+
     private fun logBudget(phase: String, estimatedTokens: Int, requestBytes: Long?, window: Int?, byteBudget: Int, reason: String, decisionId: String? = null) {
         emit("context_request_budget phase=$phase purpose=${requestPurpose.name.lowercase()} " +
             "estimated_tokens=$estimatedTokens input_budget=${window ?: "unknown"} " +
             "request_bytes=${requestBytes ?: "unknown"} byte_budget=$byteBudget reason=$reason" +
-            (decisionId?.let { " decision_id=$it" } ?: ""))
+            (decisionId?.let { " decision_id=$it" } ?: "") + policyLogFields())
     }
+
+    private fun policyLogFields(): String =
+        " policy_version=${config.compactionPolicyVersion}" +
+            " send_limit_bytes=${config.requestSendLimitBytes ?: "unknown"}" +
+            " growth_bytes=${config.requestGrowthAllowanceBytes ?: "unknown"}" +
+            " observed_bytes=${config.requestObservedBytes ?: "unknown"}" +
+            " hard_limit_bytes=${config.requestHardLimitBytes ?: "unknown"}"
 
     /** Transitional mirror of the P0 line for existing log consumers; new metrics use the decision line. */
     private fun logLegacyFallback(action: String, trigger: String, code: String, requestBytes: Long?, byteBudget: Int) {
@@ -220,7 +317,7 @@ internal class AgentContextSession(
             headroomBytes = headroomBytes,
             byteTargetStatus = byteTargetStatus,
             decisionId = decisionId,
-        ))
+        ) + policyLogFields())
     }
 
     private fun newDecisionId(): String =
@@ -267,7 +364,7 @@ internal class AgentContextSession(
             return
         }
         if (!force && (!config.autoCompactionEnabled || contextWindow == null || before == null ||
-                before < contextWindow * TRIGGER_RATIO)
+                !AgentCompactionTokenPolicy.triggered(before, contextWindow))
         ) {
             try {
                 publishSnapshot()
@@ -288,6 +385,7 @@ internal class AgentContextSession(
             reasonCode = reasonCode, activity = io.github.mangi.eta.agent.runtime.ContextCompactionActivity("preparing")))
         try {
             val compactor = AgentContextCompactor(config, provider, runController, roleplay = roleplay, onEvent = onEvent,
+                providerResolver = providerResolver,
                 support = compactionSupport, onProgress = { completed, _ ->
                     completedSlices.set(completed)
                     onEvent(AgentEvent.ContextCompaction(operation, AgentEvent.ContextCompaction.PHASE_PROGRESS, before,
@@ -301,15 +399,26 @@ internal class AgentContextSession(
                 }, candidateVerdict = { candidate ->
                     val budget = AgentRequestBudget.evaluate(config, projectRequest(candidate), requestTools(), requestPurpose)
                     val inputLimit = AgentContextBudget.inputBudget(config, requestPurpose)
-                    val tokenOk = inputLimit == null || budget.estimatedTokens <= inputLimit * 0.80
+                    val v4 = config.compactionPolicyVersion >= AgentRequestSendPolicy.VERSION
+                    val tokenOk = AgentCompactionTokenPolicy.accepts(budget.estimatedTokens, inputLimit)
+                    val tokenTargetMet = !v4 || AgentCompactionTokenPolicy.meetsTarget(budget.estimatedTokens, inputLimit)
                     val byteBudget = requestByteBudget()
                     when {
                         !tokenOk -> AgentCandidateVerdict.reject(budget.requestBytes)
-                        byteBudget == 0 -> AgentCandidateVerdict.stop(budget.requestBytes)
-                        budget.requestBytes > byteBudget -> AgentCandidateVerdict.reject(budget.requestBytes)
+                        !AgentRequestSendPolicy.allowsOriginal(config, budget.requestBytes) -> AgentCandidateVerdict.reject(budget.requestBytes)
+                        byteBudget > 0 && budget.requestBytes > byteBudget -> AgentCandidateVerdict.reject(budget.requestBytes)
                         byteGoal?.targetBytes != null && budget.requestBytes > byteGoal.targetBytes ->
                             AgentCandidateVerdict.retain(budget.requestBytes)
+                        !tokenTargetMet -> AgentCandidateVerdict.retain(budget.requestBytes)
                         else -> AgentCandidateVerdict.stop(budget.requestBytes)
+                    }
+                }, finalCandidateFits = { candidate ->
+                    if (config.compactionPolicyVersion < AgentRequestSendPolicy.VERSION) true
+                    else {
+                        val budget = AgentRequestBudget.evaluate(config, projectRequest(candidate), requestTools(), requestPurpose)
+                        val limit = AgentContextBudget.inputBudget(config, requestPurpose)
+                        AgentCompactionTokenPolicy.accepts(budget.estimatedTokens, limit) &&
+                            AgentRequestSendPolicy.allowsOriginal(config, budget.requestBytes)
                     }
                 })
             val candidate = compactor.compact(
@@ -328,6 +437,15 @@ internal class AgentContextSession(
             for (index in 0 until candidate.length()) messages.put(candidate.getJSONObject(index))
             inputTokens = null
             byteCompactionDeferred = false
+            // Publication is the commit point. A stale suppression record cannot invalidate the
+            // newly committed context (its source prefix no longer matches); cleanup is maintenance.
+            try {
+                clearPersistentByteFailure()
+            } catch (_: Exception) {
+                knownFailure = null
+                failureRecordLoaded = true
+                emit("context_compaction_failure_store action=cleanup_failed code=CONTEXT_FAILURE_RECORD_CLEANUP_FAILED")
+            }
             compactor.clearCompletedCheckpoint()
             onEvent(AgentEvent.ContextCompaction(operation, AgentEvent.ContextCompaction.PHASE_COMPLETED, before,
                 reasonCode = reasonCode))
@@ -351,7 +469,9 @@ internal class AgentContextSession(
     }
 
     private companion object {
-        const val TRIGGER_RATIO = 0.85
+        const val FAILURE_ALGORITHM_VERSION = 6
+        val PERSISTENT_BYTE_FAILURES = setOf("CONTEXT_NO_REDUCTION", "CONTEXT_SUMMARY_INVALID",
+            "CONTEXT_SUMMARY_CAPTURE_LIMIT", "CONTEXT_SUMMARY_OUTPUT_BUDGET")
 
         /** Expected no-ops after an estimate: keep the original request without a failure. */
         val SOFT_COMPACTION_FAILURES = setOf("CONTEXT_NOT_COMPACTABLE", "CONTEXT_NO_REDUCTION")
@@ -367,6 +487,8 @@ internal class AgentContextSession(
             "CONTEXT_SUMMARY_TIMEOUT",
             "CONTEXT_SUMMARY_TRANSPORT_FAILED",
             "CONTEXT_SUMMARY_INVALID",
+            "CONTEXT_SUMMARY_CAPTURE_LIMIT",
+            "CONTEXT_SUMMARY_OUTPUT_BUDGET",
             "CONTEXT_SUMMARY_TIME_BUDGET",
             "CONTEXT_SUMMARY_BUDGET",
             "CONTEXT_SUMMARY_MERGE_FAILED",

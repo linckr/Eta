@@ -17,6 +17,7 @@ internal class AgentContextCompactor(
     private val onProgress: (completedSlices: Int, resumed: Boolean) -> Unit = { _, _ -> },
     private val onActivity: (io.github.mangi.eta.agent.runtime.ContextCompactionActivity) -> Unit = {},
     private val candidateVerdict: (JSONArray) -> AgentCandidateVerdict = { AgentCandidateVerdict.reject() },
+    private val finalCandidateFits: (JSONArray) -> Boolean = { true },
 ) {
     private data class RetainedCandidate(val candidate: JSONArray, val requestBytes: Long)
     private var completedSummarizer: AgentContextSummarizer? = null
@@ -56,7 +57,7 @@ internal class AgentContextCompactor(
         }
         val summarizer = AgentContextSummarizer(config, provider, controller, roleplay, onEvent, providerResolver, support, onProgress, onActivity)
         var retained: RetainedCandidate? = null
-        val summary = summarizer.summarize(safe) { text, count ->
+        val summary = summarizer.summarize(safe, accepts = { text, count ->
             // Only complete tool boundaries can form an early candidate. Index mapping is
             // deliberately checked: a codec that removes records must not shorten coverage.
             if (safe.size != sourceMessages.size || count <= 0) false else {
@@ -82,7 +83,14 @@ internal class AgentContextCompactor(
                     }
                 }
             }
-        }
+        }, candidateFits = { text, count ->
+            if (count <= 0 || count > sourceMessages.size || safe.size != sourceMessages.size) false
+            else {
+                val originalEnd = history.indexOf(sourceMessages[count - 1]) + 1
+                canSplit(history, originalEnd) && finalCandidateFits(buildCandidate(messages, systemCount,
+                    history, safe, text, count, originalEnd, protectedUser))
+            }
+        })
         completedSummarizer = summarizer
         val count = summarizer.coveredMessages
         val actualEnd = if (count == safe.size) end else history.indexOf(sourceMessages[count - 1]) + 1
@@ -94,6 +102,9 @@ internal class AgentContextCompactor(
         // candidate was already built. Never use it to mask a failure; this is the normal end.
         if (candidateVerdict(result).action == AgentCandidateAction.REJECT) {
             retained?.let { return it.candidate }
+        }
+        if (!finalCandidateFits(result)) {
+            throw failure("CONTEXT_SUMMARY_INPUT_BUDGET", "摘要候选仍超过最终请求预算，原历史和断点已保留。")
         }
         return result
     }

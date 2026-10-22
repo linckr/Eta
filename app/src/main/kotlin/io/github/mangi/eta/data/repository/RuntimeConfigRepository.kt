@@ -130,6 +130,10 @@ internal object RuntimeConfigRepository {
             provider.id == BuiltinProviders.OPENAI_CODEX_ID
         val endpointMode = provider.endpointMode()
         val reasoningCapabilities = reasoningCapabilities(provider, model)
+        // Provider-scoped policy does not cover a model's route/header/body overrides.
+        val sendPolicy = provider.requestSendPolicy.takeIf {
+            it.isValidFor(provider) && model.customHeaders.isEmpty() && model.customBody.isEmpty()
+        }
         return AgentModelClient.ModelConfig(
             providerId = provider.id,
             providerName = provider.name,
@@ -147,6 +151,11 @@ internal object RuntimeConfigRepository {
             contextWindowKind = model.effectiveContextWindowKind,
             inputTokenLimit = model.inputTokenLimit?.takeIf { it > 0 },
             requestByteBudget = provider.requestByteBudget?.takeIf { it >= 0 },
+            compactionPolicyVersion = sendPolicy?.version ?: 0,
+            requestObservedBytes = sendPolicy?.observedBytes,
+            requestSendLimitBytes = sendPolicy?.sendLimitBytes,
+            requestGrowthAllowanceBytes = sendPolicy?.growthAllowanceBytes,
+            requestHardLimitBytes = sendPolicy?.hardLimitBytes,
             autoCompactionEnabled = Prefs.isEnabled(Prefs.Keys.AGENT_AUTO_COMPACTION_ENABLED),
             systemPrompt = systemPrompt,
             anthropicVersion = (provider as? AnthropicProviderSetting)?.anthropicVersion

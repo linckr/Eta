@@ -15,6 +15,7 @@ import androidx.room.migration.Migration
         ConversationMessageEntity::class,
         ConversationStateEntity::class,
         ProviderEntity::class,
+        CompactionFailureEntity::class,
         ProviderModelEntity::class,
         RuntimeResultEntity::class,
         RuntimeArchiveRunEntity::class,
@@ -26,11 +27,12 @@ import androidx.room.migration.Migration
         CharacterEntity::class,
         UserPersonaEntity::class,
     ],
-    version = 24,
+    version = 25,
     exportSchema = false,
 )
 internal abstract class EtaDatabase : RoomDatabase() {
     abstract fun conversationDao(): ConversationDao
+    abstract fun compactionFailureDao(): CompactionFailureDao
     abstract fun providerDao(): ProviderDao
     abstract fun runtimeRunDao(): RuntimeRunDao
     abstract fun skillDao(): SkillDao
@@ -67,12 +69,13 @@ internal abstract class EtaDatabase : RoomDatabase() {
                         MIGRATION_21_22,
                         MIGRATION_22_23,
                         MIGRATION_23_24,
+                        MIGRATION_24_25,
                     )
                     .addCallback(object : Callback() {
                         override fun onCreate(db: androidx.sqlite.db.SupportSQLiteDatabase) { createTextChunkCleanup(db) }
                         override fun onOpen(db: androidx.sqlite.db.SupportSQLiteDatabase) { createTextChunkCleanup(db) }
                     })
-                    .fallbackToDestructiveMigration(dropAllTables = true)
+                    // Preserve history: unknown upgrades/downgrades must fail closed, never clear data.
                     .build()
                     .also { instance = it }
             }
@@ -118,6 +121,15 @@ internal abstract class EtaDatabase : RoomDatabase() {
         internal val MIGRATION_22_23 = Migration(22, 23) { database ->
             database.execSQL("ALTER TABLE provider_models ADD COLUMN context_window_kind TEXT NOT NULL DEFAULT 'unknown'")
             database.execSQL("ALTER TABLE provider_models ADD COLUMN input_token_limit INTEGER")
+        }
+
+        internal val MIGRATION_24_25 = Migration(24, 25) { database ->
+            database.execSQL("ALTER TABLE model_providers ADD COLUMN request_send_policy_json TEXT NOT NULL DEFAULT '{}'")
+            database.execSQL("CREATE TABLE IF NOT EXISTS compaction_failures (" +
+                "`key` TEXT NOT NULL PRIMARY KEY, sourceDigest TEXT NOT NULL, " +
+                "policyVersion INTEGER NOT NULL, algorithmVersion INTEGER NOT NULL, " +
+                "failureCode TEXT NOT NULL, failedAtMs INTEGER NOT NULL, " +
+                "requestBytes INTEGER NOT NULL, estimatedTokens INTEGER NOT NULL)")
         }
 
         internal val MIGRATION_23_24 = Migration(23, 24) { database ->

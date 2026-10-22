@@ -314,6 +314,12 @@ internal object AgentModelClient {
         val inputTokenLimit: Int? = null,
         /** Local upload soft budget: null uses the default, zero disables it; never an API limit. */
         val requestByteBudget: Int? = null,
+        /** Explicit opt-in only; old persisted configurations retain the legacy policy. */
+        val compactionPolicyVersion: Int = 0,
+        val requestObservedBytes: Long? = null,
+        val requestSendLimitBytes: Long? = null,
+        val requestHardLimitBytes: Long? = null,
+        val requestGrowthAllowanceBytes: Long? = null,
         /** Null follows the chat model. A missing selected config fails only compaction. */
         val compactionModelId: String? = null,
         val compactionModelConfig: ModelConfig? = null,

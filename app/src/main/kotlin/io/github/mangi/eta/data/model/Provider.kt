@@ -47,6 +47,7 @@ sealed interface ProviderSetting {
     val createdAt: Long
     /** Soft serialized-request budget: null = default 512 KiB, 0 = disabled, positive = bytes. */
     val requestByteBudget: Int?
+    val requestSendPolicy: RequestSendPolicy
     val hostedWebSearchEnabled: Boolean
         get() = false
 }
@@ -70,6 +71,7 @@ data class OpenAiCompatibleProviderSetting(
     val endpointMode: String = OpenAiEndpointMode.CHAT_COMPLETIONS,
     override val hostedWebSearchEnabled: Boolean = false,
     override val requestByteBudget: Int? = null,
+    override val requestSendPolicy: RequestSendPolicy = RequestSendPolicy(),
 ) : ProviderSetting
 
 @Serializable
@@ -90,6 +92,7 @@ data class AnthropicProviderSetting(
     override val createdAt: Long = System.currentTimeMillis(),
     val anthropicVersion: String = DEFAULT_ANTHROPIC_VERSION,
     override val requestByteBudget: Int? = null,
+    override val requestSendPolicy: RequestSendPolicy = RequestSendPolicy(),
 ) : ProviderSetting {
     companion object {
         const val DEFAULT_ANTHROPIC_VERSION = "2023-06-01"
@@ -115,6 +118,7 @@ data class CustomProviderSetting(
     val endpointMode: String = OpenAiEndpointMode.CHAT_COMPLETIONS,
     override val hostedWebSearchEnabled: Boolean = false,
     override val requestByteBudget: Int? = null,
+    override val requestSendPolicy: RequestSendPolicy = RequestSendPolicy(),
 ) : ProviderSetting
 
 internal val ProviderSetting.runtimeProviderType: String

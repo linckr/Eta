@@ -26,16 +26,19 @@ internal class AgentContextSummarizer(
     var coveredMessages: Int = 0
         private set
     private var treeKey: String? = null
+    private var portableKey: String? = null
     fun clearCompletedCheckpoint() {
         checkpointKey?.let { support.checkpoints.clear(it) }
+        portableKey?.let { support.portableTextCheckpoints.clear(it) }
         treeKey?.let { support.treeStore.clear(it) }
     }
-    fun summarize(history: List<AgentModelClient.ConversationMessage>, accepts: (String, Int) -> Boolean = { _, _ -> false }): String {
+    fun summarize(history: List<AgentModelClient.ConversationMessage>, candidateFits: (String, Int) -> Boolean = { _, _ -> true },
+        accepts: (String, Int) -> Boolean = { _, _ -> false }): String {
         coveredMessages = history.size
-        return AgentCompactionActivityReporter(controller, support.clock, onActivity).use { progress -> summarize(history, progress, accepts) }
+        return AgentCompactionActivityReporter(controller, support.clock, onActivity).use { progress -> summarize(history, progress, accepts, candidateFits) }
     }
 
-    private fun summarize(history: List<AgentModelClient.ConversationMessage>, progress: AgentCompactionActivityReporter, accepts: (String, Int) -> Boolean): String {
+    private fun summarize(history: List<AgentModelClient.ConversationMessage>, progress: AgentCompactionActivityReporter, accepts: (String, Int) -> Boolean, candidateFits: (String, Int) -> Boolean): String {
         val started = support.clock()
         controller.throwIfCancelled()
         if (config.compactionModelId != null && config.compactionModelConfig == null) {
@@ -49,6 +52,14 @@ internal class AgentContextSummarizer(
             cleanConfig.copy(thinkingEnabled = false, reasoningEffort = io.github.mangi.eta.data.model.ReasoningEffort.OFF)
         else cleanConfig
         val summaryProvider = if (config.compactionModelConfig == null) provider else providerResolver(summaryConfig)
+        if (config.compactionPolicyVersion >= 4) {
+            val engine = AgentPortableTextCompaction(summaryConfig, summaryProvider, controller, roleplay,
+                support, progress, onProgress, onEvent)
+            return engine.summarize(history, accepts, candidateFits).also {
+                coveredMessages = engine.coveredMessages
+                portableKey = engine.key
+            }
+        }
         val source = AgentSummarySlices(history)
         var sliceLimit = (AgentContextBudget.requirePositiveBudget(summaryConfig, ProviderRequestPurpose.COMPACTION)?.div(3) ?: 64_000).coerceIn(MIN_SLICE_CHARS, 64_000)
         val sliceCeiling = sliceLimit

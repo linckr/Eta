@@ -115,6 +115,11 @@ internal object AgentRuntimeWire {
     private const val KEY_CONTEXT_WINDOW_KIND = "context_window_kind"
     private const val KEY_INPUT_TOKEN_LIMIT = "input_token_limit"
     private const val KEY_REQUEST_BYTE_BUDGET = "request_byte_budget"
+    private const val KEY_COMPACTION_POLICY_VERSION = "compaction_policy_version"
+    private const val KEY_REQUEST_OBSERVED_BYTES = "request_observed_bytes"
+    private const val KEY_REQUEST_SEND_LIMIT_BYTES = "request_send_limit_bytes"
+    private const val KEY_REQUEST_HARD_LIMIT_BYTES = "request_hard_limit_bytes"
+    private const val KEY_REQUEST_GROWTH_ALLOWANCE_BYTES = "request_growth_allowance_bytes"
     private const val KEY_COMPACTION_MODEL_ID = "compaction_model_id"
     private const val KEY_COMPACTION_MODEL_CONFIG = "compaction_model_config"
     private const val KEY_AUTO_COMPACTION_ENABLED = "auto_compaction_enabled"
@@ -332,6 +337,11 @@ internal object AgentRuntimeWire {
         putString(KEY_CONTEXT_WINDOW_KIND, request.config.contextWindowKind)
         request.config.inputTokenLimit?.let { putInt(KEY_INPUT_TOKEN_LIMIT, it) }
         request.config.requestByteBudget?.let { putInt(KEY_REQUEST_BYTE_BUDGET, it) }
+        putInt(KEY_COMPACTION_POLICY_VERSION, request.config.compactionPolicyVersion)
+        request.config.requestObservedBytes?.let { putLong(KEY_REQUEST_OBSERVED_BYTES, it) }
+        request.config.requestSendLimitBytes?.let { putLong(KEY_REQUEST_SEND_LIMIT_BYTES, it) }
+        request.config.requestHardLimitBytes?.let { putLong(KEY_REQUEST_HARD_LIMIT_BYTES, it) }
+        request.config.requestGrowthAllowanceBytes?.let { putLong(KEY_REQUEST_GROWTH_ALLOWANCE_BYTES, it) }
         putString(KEY_COMPACTION_MODEL_ID, request.config.compactionModelId)
         request.config.compactionModelConfig?.let {
             AgentWireText.put(this, KEY_COMPACTION_MODEL_CONFIG,
@@ -478,6 +488,11 @@ internal object AgentRuntimeWire {
                 ),
                 inputTokenLimit = bundle.optionalInt(KEY_INPUT_TOKEN_LIMIT),
                 requestByteBudget = bundle.optionalInt(KEY_REQUEST_BYTE_BUDGET)?.takeIf { it >= 0 },
+                compactionPolicyVersion = bundle.getInt(KEY_COMPACTION_POLICY_VERSION, 0).coerceAtLeast(0),
+                requestObservedBytes = bundle.optionalLong(KEY_REQUEST_OBSERVED_BYTES)?.takeIf { it > 0 },
+                requestSendLimitBytes = bundle.optionalLong(KEY_REQUEST_SEND_LIMIT_BYTES)?.takeIf { it > 0 },
+                requestHardLimitBytes = bundle.optionalLong(KEY_REQUEST_HARD_LIMIT_BYTES)?.takeIf { it > 0 },
+                requestGrowthAllowanceBytes = bundle.optionalLong(KEY_REQUEST_GROWTH_ALLOWANCE_BYTES)?.takeIf { it > 0 },
                 compactionModelId = bundle.getString(KEY_COMPACTION_MODEL_ID)?.takeIf { it.isNotBlank() },
                 compactionModelConfig = if (readText) AgentWireText.read(bundle, KEY_COMPACTION_MODEL_CONFIG)?.let {
                     json.decodeFromString<AgentModelClient.ModelConfig>(it).copy(compactionModelId = null, compactionModelConfig = null)
@@ -1033,6 +1048,9 @@ internal object AgentRuntimeWire {
 
     private fun Bundle.optionalInt(key: String): Int? =
         if (containsKey(key)) getInt(key) else null
+
+    private fun Bundle.optionalLong(key: String): Long? =
+        if (containsKey(key)) (get(key) as? Number)?.toLong() else null
 
     private fun Bundle.putTokenUsage(usage: AgentTokenUsage) {
         usage.contextTokens?.let { putInt("usage_context", it) }

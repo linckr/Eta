@@ -58,6 +58,8 @@ internal class AgentLoop(
         roleplay = roleplayContext != null,
         requestPurpose = purpose,
         compactionSupport = compactionSupport,
+        failureStore = compactionSupport.failureStore,
+        failureScopeKey = compactionSupport.failureScopeKey,
         requestTools = { currentRequestTools },
         projectRequest = { candidate -> AssistantScreenContextProjection.project(roleplayContext?.projectMessages(candidate) ?: candidate) },
         onBudgetLog = onBudgetLog,

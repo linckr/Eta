@@ -8,6 +8,7 @@ internal data class AgentByteCompactionGoal(
     val trigger: String,
     val byteBudget: Int,
     val targetBytes: Long?,
+    val sendLimitBytes: Long? = null,
 ) {
     val applies: Boolean get() = targetBytes != null
 
@@ -17,7 +18,7 @@ internal data class AgentByteCompactionGoal(
         else -> "not_met"
     }
 
-    fun headroom(afterBytes: Long): Long = byteBudget.toLong() - afterBytes
+    fun headroom(afterBytes: Long): Long = (sendLimitBytes ?: byteBudget.toLong()) - afterBytes
 
     companion object {
         private const val NUMERATOR = 3L
@@ -27,6 +28,21 @@ internal data class AgentByteCompactionGoal(
             val applies = byteBudget > 0 && (trigger == "bytes" || trigger == "both")
             return AgentByteCompactionGoal(trigger, byteBudget,
                 if (applies) byteBudget.toLong() * NUMERATOR / DENOMINATOR else null)
+        }
+
+        fun forPolicy(trigger: String, byteBudget: Int, config: AgentModelClient.ModelConfig): AgentByteCompactionGoal {
+            if (config.compactionPolicyVersion < AgentRequestSendPolicy.VERSION) return forTrigger(trigger, byteBudget)
+            val limit = config.requestSendLimitBytes?.takeIf { it > 0 }
+            val growth = config.requestGrowthAllowanceBytes?.takeIf { it > 0 }
+            if (trigger !in setOf("bytes", "both") || limit == null || growth == null) {
+                return AgentByteCompactionGoal(trigger, byteBudget, null, limit)
+            }
+            // Overflow-safe floor(3*limit/4), plus the explicitly frozen growth reserve.
+            val threeQuarters = limit / 4 * 3 + limit % 4 * 3 / 4
+            val transportTarget = minOf(threeQuarters, (limit - growth).coerceAtLeast(1)).coerceAtLeast(1)
+            val softTarget = byteBudget.takeIf { it > 0 }?.toLong()?.let { it * 3 / 4 }
+            return AgentByteCompactionGoal(trigger, byteBudget,
+                softTarget?.let { minOf(it, transportTarget) } ?: transportTarget, limit)
         }
     }
 }

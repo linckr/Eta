@@ -9,6 +9,8 @@ internal object AgentRequestBytePolicy {
     /** Resolve afresh for the current model; never persist a derived default on its provider. */
     fun resolve(config: AgentModelClient.ModelConfig,
         inputBudget: Int? = AgentContextBudget.inputBudget(config)): Int =
-        config.requestByteBudget?.takeIf { it >= 0 }
+        if (config.compactionPolicyVersion >= AgentRequestSendPolicy.VERSION) {
+            config.requestByteBudget?.takeIf { it > 0 } ?: 0
+        } else config.requestByteBudget?.takeIf { it >= 0 }
             ?: if (inputBudget != null && inputBudget >= LARGE_INPUT_THRESHOLD) LARGE_DEFAULT else SMALL_DEFAULT
 }

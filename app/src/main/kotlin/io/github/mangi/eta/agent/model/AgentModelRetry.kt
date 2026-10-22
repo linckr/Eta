@@ -40,6 +40,11 @@ internal class AgentModelRetry(
             var emptyResponseCanRetry = false
             var protocolResponseCanRetry = false
             try {
+                if (attemptRequest.config.compactionPolicyVersion >= 4) {
+                    val budget = AgentRequestBudget.evaluate(attemptRequest.config,
+                        attemptRequest.messages, attemptRequest.tools, attemptRequest.purpose)
+                    AgentRequestSendPolicy.requireAllowed(attemptRequest.config, budget.requestBytes)
+                }
                 val response = provider.complete(attemptRequest.copy(freshConnection = freshConnection), controller) { event ->
                     if (event is ProviderEvent.BlockDelta && event.delta.isNotEmpty() && event.kind != AssistantBlockKind.TOOL_CALL) visibleOutputStarted = true
                     if (event is ProviderEvent.BlockEnd && event.content.isNotEmpty() && event.kind != AssistantBlockKind.TOOL_CALL) visibleOutputStarted = true
